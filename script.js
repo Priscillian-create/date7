@@ -889,58 +889,113 @@ async function refreshSession() {
 
 // ✅ FIXED: Data Module with improved error handling
 const DataModule = {
-    // NEW: Fetch products from Supabase
+    // ✅ FIXED: More flexible fetchProducts function
     async fetchProducts() {
+        console.log('🔍 DEBUG: fetchProducts called');
+        
         try {
             if (isOnline) {
+                console.log('🌐 DEBUG: Online, fetching from Supabase');
+                
+                let query = supabase.from('products').select('*');
+                
+                // Try to filter by deleted column if it exists
                 try {
-                    const { data, error } = await supabase
-                        .from('products')
-                        .select('*');
+                    query = query.eq('deleted', false);
+                } catch (error) {
+                    console.warn('⚠️ DEBUG: deleted column might not exist, fetching all products');
+                }
+                
+                const { data, error } = await query;
+                
+                console.log('📥 DEBUG: Supabase response:', { data, error });
+                
+                if (error) {
+                    console.error('❌ DEBUG: Supabase fetch error:', error);
                     
-                    if (error) {
-                        console.error('Supabase fetch error:', error);
-                        
-                        // Check if it's an RLS policy error
-                        if (error.code === '42P17' || error.message.includes('infinite recursion')) {
-                            console.warn('Infinite recursion detected in products table policy, using local data');
-                            showNotification('Database policy issue detected for products. Using local cache.', 'warning');
-                        } else if (error.code === '42501' || error.message.includes('policy')) {
-                            console.warn('Permission denied for products table, using local data');
-                            showNotification('Permission denied for products. Using local cache.', 'warning');
-                        } else {
-                            throw error;
-                        }
-                    } else if (data) {
-                        // Normalize the data to ensure consistent field names
-                        const normalizedProducts = data.map(product => {
-                            // Handle different possible column names for expiry date
-                            if (product.expiry_date && !product.expiryDate) {
-                                product.expiryDate = product.expiry_date;
-                            } else if (product.expiryDate && !product.expiry_date) {
-                                product.expiry_date = product.expiryDate;
-                            }
-                            
-                            return product;
-                        });
-                        
-                        // Update global products variable
-                        products = normalizedProducts;
-                        saveToLocalStorage();
-                        return products;
+                    // Check if it's an RLS policy error
+                    if (error.code === '42P17' || error.message.includes('infinite recursion')) {
+                        console.warn('⚠️ DEBUG: Infinite recursion detected in products table policy, using local data');
+                        showNotification('Database policy issue detected for products. Using local cache.', 'warning');
+                    } else if (error.code === '42501' || error.message.includes('policy')) {
+                        console.warn('⚠️ DEBUG: Permission denied for products table, using local data');
+                        showNotification('Permission denied for products. Using local cache.', 'warning');
+                    } else if (error.message.includes('column') && error.message.includes('deleted')) {
+                        console.warn('⚠️ DEBUG: deleted column issue, will fetch all products');
+                        // Try again without the deleted filter
+                        return this.fetchAllProducts();
+                    } else {
+                        throw error;
                     }
-                } catch (fetchError) {
-                    console.error('Failed to fetch from Supabase:', fetchError);
-                    // Continue to local data
+                } else if (data) {
+                    console.log('✅ DEBUG: Successfully fetched products from Supabase:', data.length, 'items');
+                    
+                    // Normalize the data to ensure consistent field names
+                    const normalizedProducts = data.map(product => {
+                        // Handle different possible column names for expiry date
+                        if (product.expiry_date && !product.expiryDate) {
+                            product.expiryDate = product.expiry_date;
+                        } else if (product.expiryDate && !product.expiry_date) {
+                            product.expiry_date = product.expiryDate;
+                        }
+                        
+                        return product;
+                    });
+                    
+                    // Filter out deleted products locally if needed
+                    const activeProducts = normalizedProducts.filter(product => !product.deleted);
+                    
+                    // Update global products variable
+                    products = activeProducts;
+                    saveToLocalStorage();
+                    console.log('💾 DEBUG: Products saved to localStorage');
+                    return products;
                 }
             }
             
             // Offline or error: Use local data
-            console.log('Using local products data:', products.length);
+            console.log('📴 DEBUG: Using local products data:', products.length, 'items');
+            return products;
+            
+        } catch (error) {
+            console.error('❌ DEBUG: Error in fetchProducts:', error);
+            
+            // Show appropriate error message
+            if (error.code === '42501' || error.message.includes('policy')) {
+                showNotification('Permission denied for products. Using local cache.', 'warning');
+            } else if (error.code === '42P17' || error.message.includes('infinite recursion')) {
+                showNotification('Database policy issue detected. Using local cache.', 'warning');
+            } else {
+                showNotification('Error fetching products: ' + error.message, 'error');
+            }
+            
+            // Fall back to local data
+            return products;
+        }
+    },
+    
+    // ✅ NEW: Fallback function to fetch all products
+    async fetchAllProducts() {
+        console.log('🔄 DEBUG: Fetching all products without deleted filter');
+        
+        try {
+            const { data, error } = await supabase.from('products').select('*');
+            
+            if (error) {
+                throw error;
+            }
+            
+            if (data) {
+                // Filter out deleted products locally
+                const activeProducts = data.filter(product => !product.deleted);
+                products = activeProducts;
+                saveToLocalStorage();
+                return products;
+            }
+            
             return products;
         } catch (error) {
-            console.error('Error in fetchProducts:', error);
-            // Fall back to local data
+            console.error('❌ DEBUG: Error in fetchAllProducts:', error);
             return products;
         }
     },
@@ -1017,14 +1072,16 @@ const DataModule = {
         }
     },
     
-    // ✅ FIXED: Products with better error handling and column name flexibility
+    // ✅ FIXED: Simplified and more reliable saveProduct function
     async saveProduct(product) {
+        console.log('🔍 DEBUG: saveProduct called with:', product);
+        
         // Show loading state
         productModalLoading.style.display = 'flex';
         saveProductBtn.disabled = true;
         
         try {
-            // Validate product data before sending
+            // Validate product data
             if (!product.name || !product.category || !product.price || !product.stock || !product.expiryDate) {
                 throw new Error('Please fill in all required fields');
             }
@@ -1037,96 +1094,100 @@ const DataModule = {
                 throw new Error('Please enter a valid stock quantity');
             }
             
-            // Always save locally first
-            const localResult = this.saveProductLocally(product);
+            console.log('✅ DEBUG: Product validation passed');
             
-            if (isOnline) {
-                // Online: Try to save to Supabase
-                try {
-                    // Create a copy of the product with the correct field names
-                    const productToSave = {
-                        name: product.name,
-                        category: product.category,
-                        price: product.price,
-                        stock: product.stock,
-                        // Try different possible column names for expiry date
-                        expiry_date: product.expiryDate,  // snake_case version
-                        expiryDate: product.expiryDate,   // camelCase version
-                        barcode: product.barcode || null
-                    };
-                    
-                    if (product.id && !product.id.startsWith('temp_')) {
-                        // Update existing product
-                        const { data, error } = await supabase
-                            .from('products')
-                            .update(productToSave)
-                            .eq('id', product.id)
-                            .select();
-                        
-                        if (error) {
-                            console.error('Supabase update error:', error);
-                            throw error;
-                        }
-                        
-                        if (data && data.length > 0) {
-                            // Update local product with Supabase ID
-                            const index = products.findIndex(p => p.id === product.id);
-                            if (index >= 0) {
-                                products[index] = { ...products[index], ...data[0] };
-                                saveToLocalStorage();
-                            }
-                        }
-                    } else {
-                        // Add new product
-                        const { data, error } = await supabase
-                            .from('products')
-                            .insert(productToSave)
-                            .select();
-                        
-                        if (error) {
-                            console.error('Supabase insert error:', error);
-                            throw error;
-                        }
-                        
-                        if (data && data.length > 0) {
-                            // Update local product with Supabase ID
-                            const index = products.findIndex(p => p.id === product.id);
-                            if (index >= 0) {
-                                products[index].id = data[0].id;
-                                saveToLocalStorage();
-                            }
-                        }
-                    }
-                    
-                    return { success: true, product };
-                } catch (dbError) {
-                    console.error('Database operation failed:', dbError);
-                    
-                    // Check if it's an RLS policy error
-                    if (dbError.code === '42501' || dbError.message.includes('policy')) {
-                        showNotification('Permission denied. Product saved locally only.', 'warning');
-                    } else if (dbError.code === '42P17' || dbError.message.includes('infinite recursion')) {
-                        showNotification('Database policy issue detected. Product saved locally only.', 'warning');
-                    } else if (dbError.message && dbError.message.includes('column')) {
-                        showNotification('Database schema mismatch. Product saved locally only.', 'warning');
-                    } else {
-                        showNotification('Database error: ' + dbError.message + '. Product saved locally.', 'warning');
-                    }
-                    
-                    // Return the local save result
-                    return localResult;
+            // Prepare product data for Supabase
+            const productToSave = {
+                name: product.name,
+                category: product.category,
+                price: parseFloat(product.price),
+                stock: parseInt(product.stock),
+                expiryDate: product.expiryDate,
+                barcode: product.barcode || null
+            };
+            
+            console.log('📤 DEBUG: Prepared product for Supabase:', productToSave);
+            
+            let result;
+            
+            if (product.id && !product.id.startsWith('temp_')) {
+                // Update existing product
+                console.log('🔄 DEBUG: Updating existing product with ID:', product.id);
+                const { data, error } = await supabase
+                    .from('products')
+                    .update(productToSave)
+                    .eq('id', product.id)
+                    .select();
+                
+                if (error) {
+                    console.error('❌ DEBUG: Supabase update error:', error);
+                    throw error;
+                }
+                
+                console.log('✅ DEBUG: Product updated in Supabase:', data);
+                result = { success: true, product: data[0] || product };
+            } else {
+                // Add new product
+                console.log('➕ DEBUG: Adding new product to Supabase');
+                const { data, error } = await supabase
+                    .from('products')
+                    .insert(productToSave)
+                    .select();
+                
+                if (error) {
+                    console.error('❌ DEBUG: Supabase insert error:', error);
+                    throw error;
+                }
+                
+                console.log('✅ DEBUG: Product added to Supabase:', data);
+                
+                if (data && data.length > 0) {
+                    // Update local product with Supabase ID
+                    product.id = data[0].id;
+                    result = { success: true, product: data[0] };
+                } else {
+                    result = { success: true, product };
+                }
+            }
+            
+            // Update local products array
+            if (product.id && !product.id.startsWith('temp_')) {
+                // Update existing
+                const index = products.findIndex(p => p.id === product.id);
+                if (index >= 0) {
+                    products[index] = product;
                 }
             } else {
-                // Offline: Return local save result
-                return localResult;
+                // Add new
+                products.push(product);
             }
+            
+            // Save to localStorage
+            saveToLocalStorage();
+            
+            return result;
+            
         } catch (error) {
-            console.error('Error saving product:', error);
+            console.error('❌ DEBUG: Error saving product:', error);
             
             // Check if it's a network error
             if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
-                showNotification('Network error. Saving locally.', 'warning');
-                return this.saveProductLocally(product);
+                console.warn('⚠️ DEBUG: Network error. Saving locally only.');
+                showNotification('Network error. Product saved locally only.', 'warning');
+                
+                // Save locally only
+                if (product.id && !product.id.startsWith('temp_')) {
+                    const index = products.findIndex(p => p.id === product.id);
+                    if (index >= 0) {
+                        products[index] = product;
+                    }
+                } else {
+                    product.id = 'temp_' + Date.now();
+                    products.push(product);
+                }
+                saveToLocalStorage();
+                
+                return { success: true, product };
             } else {
                 showNotification('Error saving product: ' + error.message, 'error');
                 return { success: false, error: error.message };
@@ -1163,6 +1224,7 @@ const DataModule = {
         return { success: true, product };
     },
     
+    // ✅ FIXED: Updated deleteProduct function
     async deleteProduct(productId) {
         try {
             // Always mark as deleted locally first
@@ -1176,23 +1238,37 @@ const DataModule = {
             if (isOnline) {
                 // Online: Try to delete from Supabase
                 try {
-                    const { error } = await supabase
+                    // First try to mark as deleted
+                    const { error: updateError } = await supabase
                         .from('products')
-                        .delete()
+                        .update({ 
+                            deleted: true, 
+                            deletedAt: new Date().toISOString() 
+                        })
                         .eq('id', productId);
                     
-                    if (error) {
-                        console.error('Supabase delete error:', error);
-                        throw error;
+                    if (updateError) {
+                        console.warn('⚠️ DEBUG: Could not mark as deleted, trying hard delete');
+                        
+                        // If marking as deleted fails, try hard delete
+                        const { error: deleteError } = await supabase
+                            .from('products')
+                            .delete()
+                            .eq('id', productId);
+                        
+                        if (deleteError) {
+                            console.error('❌ DEBUG: Supabase delete error:', deleteError);
+                            throw deleteError;
+                        }
+                        
+                        // Remove from local cache
+                        products = products.filter(p => p.id !== productId);
+                        saveToLocalStorage();
                     }
-                    
-                    // Remove from local cache
-                    products = products.filter(p => p.id !== productId);
-                    saveToLocalStorage();
                     
                     return { success: true };
                 } catch (dbError) {
-                    console.error('Database delete failed:', dbError);
+                    console.error('❌ DEBUG: Database delete failed:', dbError);
                     showNotification('Failed to delete from database. Marked as deleted locally.', 'warning');
                     return { success: true };
                 }
@@ -1201,7 +1277,7 @@ const DataModule = {
                 return { success: true };
             }
         } catch (error) {
-            console.error('Error deleting product:', error);
+            console.error('❌ DEBUG: Error deleting product:', error);
             showNotification('Error deleting product', 'error');
             return { success: false, error };
         }
@@ -1404,6 +1480,7 @@ function initChangePasswordForm() {
     }
 }
 
+// ✅ FIXED: Updated showApp function
 async function showApp() {
     loginPage.style.display = 'none';
     appContainer.style.display = 'flex';
@@ -1428,9 +1505,16 @@ async function showApp() {
     
     // Fetch initial data from Supabase
     try {
+        console.log('🔄 DEBUG: Fetching initial data from Supabase');
+        
         products = await DataModule.fetchProducts();
+        console.log('📦 DEBUG: Products loaded:', products.length);
+        
         sales = await DataModule.fetchSales();
+        console.log('💰 DEBUG: Sales loaded:', sales.length);
+        
         deletedSales = await DataModule.fetchDeletedSales();
+        console.log('🗑️ DEBUG: Deleted sales loaded:', deletedSales.length);
         
         // Load data into UI
         loadProducts();
@@ -1438,8 +1522,9 @@ async function showApp() {
         
         // Set up real-time listeners
         setupRealtimeListeners();
+        
     } catch (error) {
-        console.error('Error loading initial data:', error);
+        console.error('❌ DEBUG: Error loading initial data:', error);
         showNotification('Error loading data. Using offline cache.', 'warning');
         
         // Fall back to local data
@@ -2732,8 +2817,45 @@ function attemptDatabaseRecovery() {
 // ✅ NEW: Add recovery button event listener
 document.getElementById('recovery-btn')?.addEventListener('click', attemptDatabaseRecovery);
 
+// ✅ NEW: Test Supabase connection
+async function testSupabaseConnection() {
+    console.log('🧪 DEBUG: Testing Supabase connection...');
+    
+    try {
+        // Test 1: Simple connection test
+        const { data, error } = await supabase.from('products').select('count').limit(1);
+        console.log('🧪 DEBUG: Connection test result:', { data, error });
+        
+        if (error) {
+            console.error('❌ DEBUG: Connection test failed:', error);
+            showNotification('Supabase connection failed: ' + error.message, 'error');
+            return false;
+        }
+        
+        // Test 2: Test actual product fetch
+        const { data: products, error: fetchError } = await supabase.from('products').select('*').limit(5);
+        console.log('🧪 DEBUG: Product fetch test result:', { products, fetchError });
+        
+        if (fetchError) {
+            console.error('❌ DEBUG: Product fetch test failed:', fetchError);
+            showNotification('Product fetch failed: ' + fetchError.message, 'error');
+            return false;
+        }
+        
+        console.log('✅ DEBUG: Supabase connection is working!');
+        showNotification('Supabase connection is working!', 'success');
+        return true;
+    } catch (error) {
+        console.error('❌ DEBUG: Supabase connection test error:', error);
+        showNotification('Supabase connection error: ' + error.message, 'error');
+        return false;
+    }
+}
+
 // ✅ FIXED: Updated init function with proper session handling
 async function init() {
+    console.log('🚀 DEBUG: App initialization started');
+    
     // Load data from localStorage first
     loadFromLocalStorage();
     loadSyncQueue();
@@ -2753,7 +2875,7 @@ async function init() {
         
         if (session && !error) {
             // User has an active session, fetch their data
-            console.log('Found existing session:', session.user.id);
+            console.log('🔑 DEBUG: Found existing session:', session.user.id);
             
             // Try to get user data from localStorage first
             const savedUser = localStorage.getItem(STORAGE_KEYS.CURRENT_USER);
@@ -2762,12 +2884,44 @@ async function init() {
                     const parsedUser = JSON.parse(savedUser);
                     if (parsedUser.id === session.user.id) {
                         currentUser = parsedUser;
-                        console.log('Using cached user data');
+                        console.log('👤 DEBUG: Using cached user data');
+                        
+                        // Check if we have data in localStorage, if not, fetch from Supabase
+                        if (products.length === 0) {
+                            console.log('📦 DEBUG: No products in localStorage, fetching from Supabase');
+                            try {
+                                products = await DataModule.fetchProducts();
+                                console.log('📦 DEBUG: Fetched products from Supabase:', products.length);
+                            } catch (error) {
+                                console.error('❌ DEBUG: Error fetching products from Supabase:', error);
+                            }
+                        }
+                        
+                        if (sales.length === 0) {
+                            console.log('💰 DEBUG: No sales in localStorage, fetching from Supabase');
+                            try {
+                                sales = await DataModule.fetchSales();
+                                console.log('💰 DEBUG: Fetched sales from Supabase:', sales.length);
+                            } catch (error) {
+                                console.error('❌ DEBUG: Error fetching sales from Supabase:', error);
+                            }
+                        }
+                        
+                        if (deletedSales.length === 0) {
+                            console.log('🗑️ DEBUG: No deleted sales in localStorage, fetching from Supabase');
+                            try {
+                                deletedSales = await DataModule.fetchDeletedSales();
+                                console.log('🗑️ DEBUG: Fetched deleted sales from Supabase:', deletedSales.length);
+                            } catch (error) {
+                                console.error('❌ DEBUG: Error fetching deleted sales from Supabase:', error);
+                            }
+                        }
+                        
                         showApp();
                         return;
                     }
                 } catch (e) {
-                    console.error('Error parsing saved user data:', e);
+                    console.error('❌ DEBUG: Error parsing saved user data:', e);
                 }
             }
             
@@ -2782,19 +2936,28 @@ async function init() {
                 if (!userError && userData) {
                     currentUser = userData;
                     localStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(currentUser));
+                    
+                    // Fetch data from Supabase since we don't have it locally
+                    console.log('📦 DEBUG: Fetching products from Supabase');
+                    products = await DataModule.fetchProducts();
+                    console.log('💰 DEBUG: Fetching sales from Supabase');
+                    sales = await DataModule.fetchSales();
+                    console.log('🗑️ DEBUG: Fetching deleted sales from Supabase');
+                    deletedSales = await DataModule.fetchDeletedSales();
+                    
                     showApp();
                     return;
                 } else {
-                    console.warn('Error fetching user data:', userError?.message || 'User not found');
+                    console.warn('⚠️ DEBUG: Error fetching user data:', userError?.message || 'User not found');
                     throw userError || new Error('User not found');
                 }
             } catch (fetchError) {
                 // Handle the infinite recursion error specifically
                 if (fetchError.message && fetchError.message.includes('infinite recursion')) {
-                    console.warn('Infinite recursion detected in users table policy, using fallback user data');
+                    console.warn('⚠️ DEBUG: Infinite recursion detected in users table policy, using fallback user data');
                     showNotification('Database policy issue detected. Using limited functionality.', 'warning');
                 } else {
-                    console.warn('Error fetching user data:', fetchError);
+                    console.warn('⚠️ DEBUG: Error fetching user data:', fetchError);
                 }
                 
                 // Use fallback user data from auth session
@@ -2809,12 +2972,21 @@ async function init() {
                 
                 currentUser = fallbackUser;
                 localStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(currentUser));
+                
+                // Fetch data from Supabase
+                console.log('📦 DEBUG: Fetching products from Supabase');
+                products = await DataModule.fetchProducts();
+                console.log('💰 DEBUG: Fetching sales from Supabase');
+                sales = await DataModule.fetchSales();
+                console.log('🗑️ DEBUG: Fetching deleted sales from Supabase');
+                deletedSales = await DataModule.fetchDeletedSales();
+                
                 showApp();
                 return;
             }
         }
     } catch (sessionError) {
-        console.error('Error checking session:', sessionError);
+        console.error('❌ DEBUG: Error checking session:', sessionError);
     }
     
     // If we get here, there's no active session, so set up auth state listener
@@ -2834,9 +3006,17 @@ async function init() {
                         localStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(currentUser));
                     }
                 } catch (error) {
-                    console.error('Error fetching user data:', error);
+                    console.error('❌ DEBUG: Error fetching user data:', error);
                 }
             }
+            
+            // Fetch data from Supabase
+            console.log('📦 DEBUG: Fetching products from Supabase');
+            products = await DataModule.fetchProducts();
+            console.log('💰 DEBUG: Fetching sales from Supabase');
+            sales = await DataModule.fetchSales();
+            console.log('🗑️ DEBUG: Fetching deleted sales from Supabase');
+            deletedSales = await DataModule.fetchDeletedSales();
             
             showApp();
         } else {
