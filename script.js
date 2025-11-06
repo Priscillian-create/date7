@@ -1096,13 +1096,13 @@ const DataModule = {
             
             console.log('✅ DEBUG: Product validation passed');
             
-            // Prepare product data for Supabase
+            // Prepare product data for Supabase with correct field names
             const productToSave = {
                 name: product.name,
                 category: product.category,
                 price: parseFloat(product.price),
                 stock: parseInt(product.stock),
-                expiryDate: product.expiryDate,
+                expiry_date: product.expiryDate,  // Fixed: Use expiry_date for Supabase
                 barcode: product.barcode || null
             };
             
@@ -1659,6 +1659,9 @@ function validateProductData(product) {
     validatedProduct.price = parseFloat(validatedProduct.price);
     validatedProduct.stock = parseInt(validatedProduct.stock);
     
+    // Add the expiry_date field for Supabase compatibility
+    validatedProduct.expiry_date = validatedProduct.expiryDate;
+    
     return validatedProduct;
 }
 
@@ -2039,7 +2042,7 @@ function loadAccount() {
         accountLoading.style.display = 'none';
         
         if (currentUser) {
-            document.getElementById('user-name').textContent = currentUser.name;
+            date.getElementById('user-name').textContent = currentUser.name;
             document.getElementById('user-email').textContent = currentUser.email;
             document.getElementById('user-role-display').textContent = currentUser.role;
             document.getElementById('user-created').textContent = formatDate(currentUser.created_at);
