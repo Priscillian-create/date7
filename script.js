@@ -119,14 +119,31 @@ function addToSyncQueue(operation) {
             console.log(`Sale with receipt ${receiptNumber} already in sync queue — skipping`);
             return;
         }
-    } else {
-        // For other operations, keep the original duplicate check
-        if (syncQueue.some(op => 
-            op.type === operation.type && 
-            JSON.stringify(op.data) === JSON.stringify(operation.data)
-        )) {
-            console.log('Duplicate operation detected — skipping');
-            return;
+    } else if (operation.type === 'saveProduct') {
+        // For product stock updates, check if there's already a stock update for this product
+        if (operation.data.stock !== undefined && !operation.data.name) {
+            const existingStockUpdate = syncQueue.find(op => 
+                op.type === 'saveProduct' && 
+                op.data.id === operation.data.id && 
+                op.data.stock !== undefined
+            );
+            
+            if (existingStockUpdate) {
+                // Update the existing stock update with the new value
+                existingStockUpdate.data.stock = operation.data.stock;
+                localStorage.setItem('syncQueue', JSON.stringify(syncQueue));
+                console.log(`Updated existing stock update for product ${operation.data.id}`);
+                return;
+            }
+        } else {
+            // For other operations, keep the original duplicate check
+            if (syncQueue.some(op => 
+                op.type === operation.type && 
+                JSON.stringify(op.data) === JSON.stringify(operation.data)
+            )) {
+                console.log('Duplicate operation detected — skipping');
+                return;
+            }
         }
     }
 
@@ -140,7 +157,7 @@ function addToSyncQueue(operation) {
     }
 }
 
-// ✅ FIXED: Improved processSyncQueue() - better sales handling
+// ✅ FIXED: Improved processSyncQueue() - better sales and stock handling
 function processSyncQueue() {
     if (syncQueue.length === 0) return;
 
@@ -190,7 +207,16 @@ function processSyncQueue() {
                 }
             });
     } else if (operation.type === 'saveProduct') {
-        operationPromise = supabase.from('products').upsert(operation.data);
+        // For stock updates, we need to handle them differently
+        if (operation.data.stock !== undefined && !operation.data.name) {
+            // This is a stock update, not a full product save
+            operationPromise = supabase.from('products')
+                .update({ stock: operation.data.stock })
+                .eq('id', operation.data.id);
+        } else {
+            // This is a full product save
+            operationPromise = supabase.from('products').upsert(operation.data);
+        }
     } else if (operation.type === 'deleteProduct') {
         operationPromise = supabase.from('products').delete().eq('id', operation.id);
     } else if (operation.type === 'deleteSale') {
@@ -234,6 +260,16 @@ function processSyncQueue() {
                 syncStatus.classList.add('show');
                 syncStatusText.textContent = 'All data synced';
                 setTimeout(() => syncStatus.classList.remove('show'), 3000);
+                
+                // Refresh products after sync is complete
+                DataModule.fetchProducts().then(updatedProducts => {
+                    products = updatedProducts;
+                    saveToLocalStorage();
+                    loadProducts();
+                    if (currentPage === 'inventory') {
+                        loadInventory();
+                    }
+                });
             }
         }, 800);
     }
@@ -889,7 +925,7 @@ async function refreshSession() {
 
 // ✅ FIXED: Data Module with improved error handling
 const DataModule = {
-    // ✅ FIXED: More flexible fetchProducts function
+    // ✅ FIXED: More flexible fetchProducts function with merge logic
     async fetchProducts() {
         console.log('🔍 DEBUG: fetchProducts called');
         
@@ -943,8 +979,11 @@ const DataModule = {
                     // Filter out deleted products locally if needed
                     const activeProducts = normalizedProducts.filter(product => !product.deleted);
                     
+                    // Merge with local products to preserve any local changes
+                    const mergedProducts = this.mergeProductData(activeProducts);
+                    
                     // Update global products variable
-                    products = activeProducts;
+                    products = mergedProducts;
                     saveToLocalStorage();
                     console.log('💾 DEBUG: Products saved to localStorage');
                     return products;
@@ -972,6 +1011,55 @@ const DataModule = {
         }
     },
     
+    // ✅ NEW: Helper function to merge product data
+    mergeProductData(serverProducts) {
+        // Create a map of server products by ID for quick lookup
+        const serverProductsMap = {};
+        serverProducts.forEach(product => {
+            serverProductsMap[product.id] = product;
+        });
+        
+        // Create a map of local products by ID for quick lookup
+        const localProductsMap = {};
+        products.forEach(product => {
+            localProductsMap[product.id] = product;
+        });
+        
+        // Merge the data
+        const mergedProducts = [];
+        
+        // First, add all server products
+        serverProducts.forEach(serverProduct => {
+            const localProduct = localProductsMap[serverProduct.id];
+            
+            if (localProduct) {
+                // If we have a local version, check if it has been modified more recently
+                const serverDate = new Date(serverProduct.updated_at || serverProduct.created_at || 0);
+                const localDate = new Date(localProduct.updated_at || localProduct.created_at || 0);
+                
+                if (localDate > serverDate) {
+                    // Local version is newer, use it
+                    mergedProducts.push(localProduct);
+                } else {
+                    // Server version is newer or same age, use it
+                    mergedProducts.push(serverProduct);
+                }
+            } else {
+                // No local version, use server version
+                mergedProducts.push(serverProduct);
+            }
+        });
+        
+        // Then, add any local products that aren't on the server
+        products.forEach(localProduct => {
+            if (!serverProductsMap[localProduct.id]) {
+                mergedProducts.push(localProduct);
+            }
+        });
+        
+        return mergedProducts;
+    },
+    
     // ✅ NEW: Fallback function to fetch all products
     async fetchAllProducts() {
         console.log('🔄 DEBUG: Fetching all products without deleted filter');
@@ -996,7 +1084,11 @@ const DataModule = {
                 
                 // Filter out deleted products locally
                 const activeProducts = normalizedProducts.filter(product => !product.deleted);
-                products = activeProducts;
+                
+                // Merge with local products to preserve any local changes
+                const mergedProducts = this.mergeProductData(activeProducts);
+                
+                products = mergedProducts;
                 saveToLocalStorage();
                 return products;
             }
@@ -2245,7 +2337,7 @@ function clearCart() {
     updateCart();
 }
 
-// ✅ FIXED: Improved completeSale function with better error handling
+// ✅ FIXED: Improved completeSale function with better error handling and stock sync
 async function completeSale() {
     if (cart.length === 0) {
         showNotification('Cart is empty', 'error');
@@ -2272,13 +2364,24 @@ async function completeSale() {
         const result = await DataModule.saveSale(sale);
         
         if (result.success) {
-            // Update product stock locally
+            // Update product stock locally AND add to sync queue
             for (const cartItem of cart) {
                 const product = products.find(p => p.id === cartItem.id);
                 if (product) {
                     product.stock -= cartItem.quantity;
+                    
+                    // Add product update to sync queue
+                    addToSyncQueue({
+                        type: 'saveProduct',
+                        data: {
+                            id: product.id,
+                            stock: product.stock
+                        }
+                    });
                 }
             }
+            
+            // Save to localStorage
             saveToLocalStorage();
             
             // Show receipt
@@ -2302,6 +2405,40 @@ async function completeSale() {
         // Hide loading state
         completeSaleBtn.classList.remove('loading');
         completeSaleBtn.disabled = false;
+    }
+}
+
+// ✅ NEW: Function to update product stock
+async function updateProductStock(productId, newStock) {
+    try {
+        // Update locally first
+        const product = products.find(p => p.id === productId);
+        if (product) {
+            product.stock = newStock;
+            saveToLocalStorage();
+            
+            // Add to sync queue
+            addToSyncQueue({
+                type: 'saveProduct',
+                data: {
+                    id: productId,
+                    stock: newStock
+                }
+            });
+            
+            // Update UI
+            loadProducts();
+            if (currentPage === 'inventory') {
+                loadInventory();
+            }
+            
+            return { success: true };
+        } else {
+            return { success: false, error: 'Product not found' };
+        }
+    } catch (error) {
+        console.error('Error updating product stock:', error);
+        return { success: false, error: error.message };
     }
 }
 
