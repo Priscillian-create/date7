@@ -96,8 +96,13 @@ window.addEventListener('online', () => {
     offlineIndicator.classList.remove('show');
     showNotification('You are back online!', 'success');
     
-    // Check Supabase connection
+    // Check Supabase connection and sync
     checkSupabaseConnection();
+    
+    // Force refresh all data when coming back online
+    setTimeout(() => {
+        refreshAllData();
+    }, 1000);
 });
 
 window.addEventListener('offline', () => {
@@ -105,173 +110,395 @@ window.addEventListener('offline', () => {
     offlineIndicator.classList.add('show');
 });
 
-// ✅ FIXED: Improved addToSyncQueue() - better duplicate detection
+// ✅ NEW: Function to refresh all data when coming back online
+async function refreshAllData() {
+    console.log('🔄 Refreshing all data after reconnection...');
+    
+    try {
+        // Show sync status
+        syncStatus.classList.add('show', 'syncing');
+        syncStatusText.textContent = 'Syncing all data...';
+        
+        // Fetch fresh data from Supabase
+        const [newProducts, newSales, newDeletedSales] = await Promise.all([
+            DataModule.fetchProducts(),
+            DataModule.fetchSales(),
+            DataModule.fetchDeletedSales()
+        ]);
+        
+        // Update global variables
+        products = newProducts;
+        sales = newSales;
+        deletedSales = newDeletedSales;
+        
+        // Save to localStorage
+        saveToLocalStorage();
+        
+        // Refresh UI
+        loadProducts();
+        loadSales();
+        
+        if (currentPage === 'inventory') {
+            loadInventory();
+        } else if (currentPage === 'reports') {
+            generateReport();
+        } else if (currentPage === 'account') {
+            loadAccount();
+        }
+        
+        // Process any remaining sync queue
+        if (syncQueue.length > 0) {
+            await processSyncQueue();
+        }
+        
+        syncStatus.classList.remove('syncing');
+        syncStatus.classList.add('show');
+        syncStatusText.textContent = 'All data synced';
+        setTimeout(() => syncStatus.classList.remove('show'), 3000);
+        
+        showNotification('All data synchronized successfully!', 'success');
+        
+    } catch (error) {
+        console.error('Error refreshing data:', error);
+        syncStatus.classList.remove('syncing');
+        syncStatus.classList.add('error');
+        syncStatusText.textContent = 'Sync error';
+        setTimeout(() => syncStatus.classList.remove('show', 'error'), 3000);
+        showNotification('Error syncing data. Please try again.', 'error');
+    }
+}
+
+// ✅ FIXED: Improved addToSyncQueue() - better duplicate detection and offline handling
 function addToSyncQueue(operation) {
+    console.log('🔄 Adding to sync queue:', operation.type, operation.data?.id || operation.data?.receiptNumber);
+    
+    // Generate unique ID for operation if not present
+    if (!operation.id) {
+        operation.id = 'op_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+    }
+    
+    // Add timestamp
+    operation.timestamp = new Date().toISOString();
+    
     // For sales, check by receipt number instead of exact data match
     if (operation.type === 'saveSale') {
         const receiptNumber = operation.data.receiptNumber;
         
         // Check if this sale is already in the queue
-        if (syncQueue.some(op => 
+        const existingIndex = syncQueue.findIndex(op => 
             op.type === 'saveSale' && 
             op.data.receiptNumber === receiptNumber
-        )) {
-            console.log(`Sale with receipt ${receiptNumber} already in sync queue — skipping`);
-            return;
+        );
+        
+        if (existingIndex !== -1) {
+            console.log(`Sale with receipt ${receiptNumber} already in sync queue — updating`);
+            syncQueue[existingIndex] = operation;
+        } else {
+            syncQueue.push(operation);
         }
     } else if (operation.type === 'saveProduct') {
         // For product stock updates, check if there's already a stock update for this product
         if (operation.data.stock !== undefined && !operation.data.name) {
-            const existingStockUpdate = syncQueue.find(op => 
+            const existingIndex = syncQueue.findIndex(op => 
                 op.type === 'saveProduct' && 
                 op.data.id === operation.data.id && 
                 op.data.stock !== undefined
             );
             
-            if (existingStockUpdate) {
+            if (existingIndex !== -1) {
                 // Update the existing stock update with the new value
-                existingStockUpdate.data.stock = operation.data.stock;
-                localStorage.setItem('syncQueue', JSON.stringify(syncQueue));
+                syncQueue[existingIndex].data.stock = operation.data.stock;
                 console.log(`Updated existing stock update for product ${operation.data.id}`);
-                return;
+            } else {
+                syncQueue.push(operation);
             }
         } else {
-            // For other operations, keep the original duplicate check
-            if (syncQueue.some(op => 
+            // For other operations, check for duplicates
+            const existingIndex = syncQueue.findIndex(op => 
                 op.type === operation.type && 
-                JSON.stringify(op.data) === JSON.stringify(operation.data)
-            )) {
-                console.log('Duplicate operation detected — skipping');
-                return;
+                op.data.id === operation.data.id
+            );
+            
+            if (existingIndex !== -1) {
+                syncQueue[existingIndex] = operation;
+            } else {
+                syncQueue.push(operation);
             }
         }
+    } else {
+        // For other operations, check for duplicates
+        const existingIndex = syncQueue.findIndex(op => 
+            op.type === operation.type && 
+            op.id === operation.id
+        );
+        
+        if (existingIndex !== -1) {
+            syncQueue[existingIndex] = operation;
+        } else {
+            syncQueue.push(operation);
+        }
     }
-
-    syncQueue.push(operation);
+    
+    // Save to localStorage
     localStorage.setItem('syncQueue', JSON.stringify(syncQueue));
-
+    
     if (isOnline) {
+        // Process immediately if online
         processSyncQueue();
     } else {
-        showNotification('Offline: Sale saved locally and will sync automatically.', 'info');
+        showNotification('Offline: Operation saved locally and will sync automatically.', 'info');
     }
 }
 
-// ✅ FIXED: Improved processSyncQueue() - better sales and stock handling
-function processSyncQueue() {
-    if (syncQueue.length === 0) return;
-
-    syncStatus.classList.add('show', 'syncing');
-    syncStatusText.textContent = 'Syncing data...';
-
-    const operation = syncQueue.shift();
-
-    if (operation.synced) {
-        processNext();
+// ✅ FIXED: Improved processSyncQueue() - better error handling and retry logic
+async function processSyncQueue() {
+    if (syncQueue.length === 0) {
+        console.log('✅ Sync queue is empty');
         return;
     }
+    
+    console.log(`🔄 Processing sync queue with ${syncQueue.length} operations`);
+    
+    syncStatus.classList.add('show', 'syncing');
+    syncStatusText.textContent = `Syncing ${syncQueue.length} operations...`;
+    
+    // Sort operations by timestamp (oldest first)
+    syncQueue.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    
+    // Process operations one by one
+    for (let i = 0; i < syncQueue.length; i++) {
+        const operation = syncQueue[i];
+        
+        if (operation.synced) {
+            continue;
+        }
+        
+        console.log(`🔄 Processing operation ${i + 1}/${syncQueue.length}:`, operation.type);
+        
+        try {
+            let success = false;
+            
+            if (operation.type === 'saveSale') {
+                success = await syncSale(operation);
+            } else if (operation.type === 'saveProduct') {
+                success = await syncProduct(operation);
+            } else if (operation.type === 'deleteProduct') {
+                success = await syncDeleteProduct(operation);
+            } else if (operation.type === 'deleteSale') {
+                success = await syncDeleteSale(operation);
+            }
+            
+            if (success) {
+                operation.synced = true;
+                operation.syncedAt = new Date().toISOString();
+                console.log(`✅ Successfully synced operation:`, operation.type);
+            } else {
+                console.warn(`⚠️ Failed to sync operation:`, operation.type);
+                // Don't mark as synced, will retry
+            }
+        } catch (error) {
+            console.error(`❌ Error syncing operation:`, operation.type, error);
+            // Don't mark as synced, will retry
+        }
+        
+        // Small delay between operations
+        await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    
+    // Save updated sync queue
+    localStorage.setItem('syncQueue', JSON.stringify(syncQueue));
+    
+    // Remove synced operations
+    const originalLength = syncQueue.length;
+    syncQueue = syncQueue.filter(op => !op.synced);
+    
+    if (syncQueue.length < originalLength) {
+        localStorage.setItem('syncQueue', JSON.stringify(syncQueue));
+        console.log(`🗑️ Removed ${originalLength - syncQueue.length} synced operations from queue`);
+    }
+    
+    // Update UI
+    if (syncQueue.length === 0) {
+        syncStatus.classList.remove('syncing');
+        syncStatus.classList.add('show');
+        syncStatusText.textContent = 'All data synced';
+        setTimeout(() => syncStatus.classList.remove('show'), 3000);
+        
+        // Refresh data after successful sync
+        await refreshAllData();
+    } else {
+        syncStatus.classList.remove('syncing');
+        syncStatus.classList.add('error');
+        syncStatusText.textContent = `${syncQueue.length} operations pending`;
+        setTimeout(() => syncStatus.classList.remove('show', 'error'), 3000);
+    }
+}
 
-    let operationPromise;
-
-    if (operation.type === 'saveSale') {
+// ✅ NEW: Individual sync functions for better error handling
+async function syncSale(operation) {
+    try {
         // Check if sale already exists by receipt number
-        operationPromise = supabase.from('sales').select('*').eq('receiptNumber', operation.data.receiptNumber)
-            .then(({ data, error }) => {
-                if (!error && data && data.length === 0) {
-                    // Sale doesn't exist, add it to Supabase
-                    return supabase.from('sales').insert(operation.data)
-                        .then(({ data, error }) => {
-                            if (!error && data && data.length > 0) {
-                                // Update the local sale with the Supabase ID
-                                const localSaleIndex = sales.findIndex(s => s.receiptNumber === operation.data.receiptNumber);
-                                if (localSaleIndex !== -1) {
-                                    sales[localSaleIndex].id = data[0].id;
-                                    saveToLocalStorage();
-                                }
-                                return data[0];
-                            } else {
-                                throw error;
-                            }
-                        });
-                } else {
-                    console.log(`Sale with receipt ${operation.data.receiptNumber} already exists — skipping`);
-                    // Update the local sale with the Supabase ID
-                    if (data && data.length > 0) {
-                        const localSaleIndex = sales.findIndex(s => s.receiptNumber === operation.data.receiptNumber);
-                        if (localSaleIndex !== -1) {
-                            sales[localSaleIndex].id = data[0].id;
-                            saveToLocalStorage();
-                        }
-                    }
-                    return Promise.resolve();
+        const { data: existingSales, error: fetchError } = await supabase
+            .from('sales')
+            .select('*')
+            .eq('receiptNumber', operation.data.receiptNumber);
+        
+        if (fetchError) {
+            throw fetchError;
+        }
+        
+        if (!existingSales || existingSales.length === 0) {
+            // Sale doesn't exist, add it to Supabase
+            const { data, error } = await supabase
+                .from('sales')
+                .insert(operation.data)
+                .select();
+            
+            if (error) {
+                throw error;
+            }
+            
+            if (data && data.length > 0) {
+                // Update the local sale with the Supabase ID
+                const localSaleIndex = sales.findIndex(s => s.receiptNumber === operation.data.receiptNumber);
+                if (localSaleIndex !== -1) {
+                    sales[localSaleIndex].id = data[0].id;
+                    saveToLocalStorage();
                 }
-            });
-    } else if (operation.type === 'saveProduct') {
-        // For stock updates, we need to handle them differently
+                return true;
+            }
+        } else {
+            console.log(`Sale with receipt ${operation.data.receiptNumber} already exists`);
+            // Update the local sale with the Supabase ID
+            if (existingSales.length > 0) {
+                const localSaleIndex = sales.findIndex(s => s.receiptNumber === operation.data.receiptNumber);
+                if (localSaleIndex !== -1) {
+                    sales[localSaleIndex].id = existingSales[0].id;
+                    saveToLocalStorage();
+                }
+            }
+            return true;
+        }
+        
+        return false;
+    } catch (error) {
+        console.error('Error syncing sale:', error);
+        return false;
+    }
+}
+
+async function syncProduct(operation) {
+    try {
         if (operation.data.stock !== undefined && !operation.data.name) {
-            // This is a stock update, not a full product save
-            operationPromise = supabase.from('products')
+            // This is a stock update
+            const { error } = await supabase
+                .from('products')
                 .update({ stock: operation.data.stock })
                 .eq('id', operation.data.id);
+            
+            if (error) {
+                throw error;
+            }
         } else {
             // This is a full product save
-            operationPromise = supabase.from('products').upsert(operation.data);
-        }
-    } else if (operation.type === 'deleteProduct') {
-        operationPromise = supabase.from('products').delete().eq('id', operation.id);
-    } else if (operation.type === 'deleteSale') {
-        operationPromise = supabase.from('sales').delete().eq('id', operation.id);
-    } else {
-        operationPromise = Promise.resolve();
-    }
-
-    operationPromise
-        .then(() => {
-            operation.synced = true;
-            localStorage.setItem('syncQueue', JSON.stringify(syncQueue));
-            processNext();
-        })
-        .catch(error => {
-            console.error('Sync error:', error);
-            
-            // Check if it's a policy error
-            if (error.code === '42P17' || error.message.includes('infinite recursion')) {
-                console.warn('Policy error during sync, marking as synced to prevent retry');
-                operation.synced = true;
-                localStorage.setItem('syncQueue', JSON.stringify(syncQueue));
-                processNext();
-                return;
-            }
-            
-            syncQueue.unshift(operation);
-            localStorage.setItem('syncQueue', JSON.stringify(syncQueue));
-            syncStatus.classList.remove('syncing');
-            syncStatus.classList.add('error');
-            syncStatusText.textContent = 'Sync error';
-            setTimeout(() => syncStatus.classList.remove('show', 'error'), 3000);
-        });
-
-    function processNext() {
-        setTimeout(() => {
-            if (syncQueue.length > 0) {
-                processSyncQueue();
-            } else {
-                syncStatus.classList.remove('syncing');
-                syncStatus.classList.add('show');
-                syncStatusText.textContent = 'All data synced';
-                setTimeout(() => syncStatus.classList.remove('show'), 3000);
+            if (operation.data.id && !operation.data.id.startsWith('temp_')) {
+                // Update existing product
+                const { error } = await supabase
+                    .from('products')
+                    .update(operation.data)
+                    .eq('id', operation.data.id);
                 
-                // Refresh products after sync is complete
-                DataModule.fetchProducts().then(updatedProducts => {
-                    products = updatedProducts;
-                    saveToLocalStorage();
-                    loadProducts();
-                    if (currentPage === 'inventory') {
-                        loadInventory();
+                if (error) {
+                    throw error;
+                }
+            } else {
+                // Add new product
+                const { data, error } = await supabase
+                    .from('products')
+                    .insert(operation.data)
+                    .select();
+                
+                if (error) {
+                    throw error;
+                }
+                
+                if (data && data.length > 0) {
+                    // Update local product with Supabase ID
+                    const localProductIndex = products.findIndex(p => p.id === operation.data.id);
+                    if (localProductIndex !== -1) {
+                        products[localProductIndex].id = data[0].id;
+                        saveToLocalStorage();
                     }
-                });
+                }
             }
-        }, 800);
+        }
+        
+        return true;
+    } catch (error) {
+        console.error('Error syncing product:', error);
+        return false;
+    }
+}
+
+async function syncDeleteProduct(operation) {
+    try {
+        const { error } = await supabase
+            .from('products')
+            .delete()
+            .eq('id', operation.id);
+        
+        if (error) {
+            throw error;
+        }
+        
+        return true;
+    } catch (error) {
+        console.error('Error syncing product deletion:', error);
+        return false;
+    }
+}
+
+async function syncDeleteSale(operation) {
+    try {
+        // First, get the sale data
+        const { data: saleData, error: fetchError } = await supabase
+            .from('sales')
+            .select('*')
+            .eq('id', operation.id)
+            .single();
+        
+        if (fetchError) {
+            throw fetchError;
+        }
+        
+        if (saleData) {
+            // Add to deleted_sales table
+            saleData.deleted = true;
+            saleData.deletedAt = new Date().toISOString();
+            
+            const { error: insertError } = await supabase
+                .from('deleted_sales')
+                .insert(saleData);
+            
+            if (insertError) {
+                throw insertError;
+            }
+            
+            // Delete from sales table
+            const { error: deleteError } = await supabase
+                .from('sales')
+                .delete()
+                .eq('id', operation.id);
+            
+            if (deleteError) {
+                throw deleteError;
+            }
+        }
+        
+        return true;
+    } catch (error) {
+        console.error('Error syncing sale deletion:', error);
+        return false;
     }
 }
 
@@ -281,6 +508,22 @@ function loadSyncQueue() {
     if (savedQueue) {
         try {
             syncQueue = JSON.parse(savedQueue);
+            console.log(`📥 Loaded ${syncQueue.length} operations from sync queue`);
+            
+            // Clean up old operations (older than 7 days)
+            const weekAgo = new Date();
+            weekAgo.setDate(weekAgo.getDate() - 7);
+            
+            const originalLength = syncQueue.length;
+            syncQueue = syncQueue.filter(op => {
+                const opDate = new Date(op.timestamp || 0);
+                return opDate > weekAgo;
+            });
+            
+            if (syncQueue.length < originalLength) {
+                console.log(`🗑️ Removed ${originalLength - syncQueue.length} old operations from sync queue`);
+                localStorage.setItem('syncQueue', JSON.stringify(syncQueue));
+            }
         } catch (e) {
             console.error('Error parsing sync queue:', e);
             syncQueue = [];
@@ -638,13 +881,27 @@ const AuthModule = {
         try {
             // Check if current user is logged in and is admin
             const { data: { user } } = await supabase.auth.getUser();
-            if (!user) {
-                showNotification("You must be logged in as an admin to create users.", "error");
+            if (!user || !currentUser || currentUser.role !== 'admin') {
+                showNotification("Only admins can create new users.", "error");
                 return { success: false };
             }
 
             // Ask admin to confirm their password
             const adminPassword = prompt("Please confirm your admin password to continue:");
+            if (!adminPassword) {
+                return { success: false };
+            }
+
+            // Verify admin password
+            const { error: signInError } = await supabase.auth.signInWithPassword({
+                email: currentUser.email,
+                password: adminPassword
+            });
+
+            if (signInError) {
+                showNotification("Incorrect admin password.", "error");
+                return { success: false };
+            }
 
             // Create the new user account
             const { data, error } = await supabase.auth.admin.createUser({
@@ -697,6 +954,12 @@ const AuthModule = {
         // Show loading state
         loginSubmitBtn.classList.add('loading');
         loginSubmitBtn.disabled = true;
+        
+        // Show loading indicator
+        const loginLoadingIndicator = document.getElementById('login-loading-indicator');
+        if (loginLoadingIndicator) {
+            loginLoadingIndicator.style.display = 'block';
+        }
         
         try {
             const { data, error } = await supabase.auth.signInWithPassword({
@@ -785,6 +1048,11 @@ const AuthModule = {
             // Hide loading state
             loginSubmitBtn.classList.remove('loading');
             loginSubmitBtn.disabled = false;
+            
+            // Hide loading indicator
+            if (loginLoadingIndicator) {
+                loginLoadingIndicator.style.display = 'none';
+            }
         }
     },
     
@@ -1332,6 +1600,12 @@ const DataModule = {
                 }
                 saveToLocalStorage();
                 
+                // Add to sync queue
+                addToSyncQueue({
+                    type: 'saveProduct',
+                    data: product
+                });
+                
                 return { success: true, product };
             } else {
                 showNotification('Error saving product: ' + error.message, 'error');
@@ -1415,10 +1689,22 @@ const DataModule = {
                 } catch (dbError) {
                     console.error('❌ DEBUG: Database delete failed:', dbError);
                     showNotification('Failed to delete from database. Marked as deleted locally.', 'warning');
+                    
+                    // Add to sync queue
+                    addToSyncQueue({
+                        type: 'deleteProduct',
+                        id: productId
+                    });
+                    
                     return { success: true };
                 }
             } else {
-                // Offline: Already marked as deleted locally
+                // Offline: Add to sync queue
+                addToSyncQueue({
+                    type: 'deleteProduct',
+                    id: productId
+                });
+                
                 return { success: true };
             }
         } catch (error) {
@@ -1496,7 +1782,13 @@ const DataModule = {
                     return localResult;
                 }
             } else {
-                // Offline: Return local save result
+                // Offline: Add to sync queue
+                addToSyncQueue({
+                    type: 'saveSale',
+                    data: sale
+                });
+                
+                // Return local save result
                 return localResult;
             }
         } catch (error) {
@@ -1512,12 +1804,6 @@ const DataModule = {
         sale.id = 'temp_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
         sales.push(sale);
         saveToLocalStorage();
-
-        // Add to sync queue
-        addToSyncQueue({
-            type: 'saveSale',
-            data: sale
-        });
 
         return { success: true, sale };
     },
@@ -1580,10 +1866,22 @@ const DataModule = {
                 } catch (dbError) {
                     console.error('Database delete failed:', dbError);
                     showNotification('Failed to delete from database. Marked as deleted locally.', 'warning');
+                    
+                    // Add to sync queue
+                    addToSyncQueue({
+                        type: 'deleteSale',
+                        id: saleId
+                    });
+                    
                     return { success: true };
                 }
             } else {
-                // Offline: Already marked as deleted locally
+                // Offline: Add to sync queue
+                addToSyncQueue({
+                    type: 'deleteSale',
+                    id: saleId
+                });
+                
                 return { success: true };
             }
         } catch (error) {
@@ -1643,6 +1941,12 @@ async function showApp() {
         } else {
             usersContainer.style.display = 'none';
         }
+        
+        // Show/hide add product buttons based on admin status
+        const addProductBtns = document.querySelectorAll('.add-product-btn');
+        addProductBtns.forEach(btn => {
+            btn.style.display = AuthModule.isAdmin() ? 'block' : 'none';
+        });
         
         // Initialize the change password form with username field
         initChangePasswordForm();
@@ -1838,10 +2142,14 @@ function loadProducts() {
         const daysUntilExpiry = Math.ceil((expiryDate - today) / (1000 * 60 * 60 * 24));
         
         let expiryWarning = '';
+        let productNameStyle = '';
+        
         if (daysUntilExpiry < 0) {
             expiryWarning = `<div class="expiry-warning"><i class="fas fa-exclamation-triangle"></i> Expired</div>`;
+            productNameStyle = 'style="color: red; font-weight: bold;"';
         } else if (daysUntilExpiry <= settings.expiryWarningDays) {
             expiryWarning = `<div class="expiry-warning"><i class="fas fa-clock"></i> Expires in ${daysUntilExpiry} days</div>`;
+            productNameStyle = 'style="color: red; font-weight: bold;"';
         }
         
         // Check stock status
@@ -1856,7 +2164,7 @@ function loadProducts() {
             <div class="product-img">
                 <i class="fas fa-box"></i>
             </div>
-            <h4>${product.name}</h4>
+            <h4 ${productNameStyle}>${product.name}</h4>
             <div class="price">${formatCurrency(product.price)}</div>
             <div class="stock ${stockClass}">Stock: ${product.stock}</div>
             ${expiryWarning}
@@ -1900,6 +2208,7 @@ function loadInventory() {
             let rowClass = '';
             let stockBadgeClass = 'stock-high';
             let stockBadgeText = 'In Stock';
+            let productNameStyle = '';
             
             if (product.stock <= 0) {
                 stockBadgeClass = 'stock-low';
@@ -1916,18 +2225,37 @@ function loadInventory() {
                 expiryBadgeClass = 'expiry-expired';
                 expiryBadgeText = 'Expired';
                 rowClass = 'expired';
+                productNameStyle = 'style="color: red; font-weight: bold;"';
             } else if (daysUntilExpiry <= settings.expiryWarningDays) {
                 expiryBadgeClass = 'expiry-warning';
                 expiryBadgeText = 'Expiring Soon';
                 rowClass = 'expiring-soon';
+                productNameStyle = 'style="color: red; font-weight: bold;"';
             }
             
             const row = document.createElement('tr');
             if (rowClass) row.className = rowClass;
             
+            // Build action buttons based on user role
+            let actionButtons = '';
+            if (AuthModule.isAdmin()) {
+                actionButtons = `
+                    <div class="action-buttons">
+                        <button class="btn-edit" onclick="editProduct('${product.id}')">
+                            <i class="fas fa-edit"></i>
+                        </button>
+                        <button class="btn-delete" onclick="deleteProduct('${product.id}')">
+                            <i class="fas fa-trash"></i>
+                        </button>
+                    </div>
+                `;
+            } else {
+                actionButtons = '<span class="no-permission">Admin only</span>';
+            }
+            
             row.innerHTML = `
                 <td>${product.id}</td>
-                <td>${product.name}</td>
+                <td ${productNameStyle}>${product.name}</td>
                 <td>${product.category}</td>
                 <td>${formatCurrency(product.price)}</td>
                 <td>${product.stock}</td>
@@ -1937,14 +2265,7 @@ function loadInventory() {
                     <span class="expiry-badge ${expiryBadgeClass}">${expiryBadgeText}</span>
                 </td>
                 <td>
-                    <div class="action-buttons">
-                        <button class="btn-edit" onclick="editProduct('${product.id}')">
-                            <i class="fas fa-edit"></i>
-                        </button>
-                        <button class="btn-delete" onclick="deleteProduct('${product.id}')">
-                            <i class="fas fa-trash"></i>
-                        </button>
-                    </div>
+                    ${actionButtons}
                 </td>
             `;
             
@@ -2364,7 +2685,7 @@ async function completeSale() {
         const result = await DataModule.saveSale(sale);
         
         if (result.success) {
-            // Update product stock locally AND add to sync queue
+            // Update product stock locally
             for (const cartItem of cart) {
                 const product = products.find(p => p.id === cartItem.id);
                 if (product) {
@@ -2516,6 +2837,12 @@ function printReceipt() {
 
 // Product Modal Functions
 function openProductModal(product = null) {
+    // Check if user is admin
+    if (!AuthModule.isAdmin()) {
+        showNotification('Only admins can add or edit products', 'error');
+        return;
+    }
+    
     const modalTitle = document.getElementById('modal-title');
     const productForm = document.getElementById('product-form');
     
@@ -2547,6 +2874,12 @@ function closeProductModal() {
 
 // ✅ FIXED: Updated saveProduct function with validation
 async function saveProduct() {
+    // Check if user is admin
+    if (!AuthModule.isAdmin()) {
+        showNotification('Only admins can add or edit products', 'error');
+        return;
+    }
+    
     const productForm = document.getElementById('product-form');
     const productId = productForm.dataset.productId;
     
@@ -2582,6 +2915,12 @@ async function saveProduct() {
 }
 
 function editProduct(productId) {
+    // Check if user is admin
+    if (!AuthModule.isAdmin()) {
+        showNotification('Only admins can edit products', 'error');
+        return;
+    }
+    
     const product = products.find(p => p.id === productId);
     if (product) {
         openProductModal(product);
@@ -2589,6 +2928,12 @@ function editProduct(productId) {
 }
 
 async function deleteProduct(productId) {
+    // Check if user is admin
+    if (!AuthModule.isAdmin()) {
+        showNotification('Only admins can delete products', 'error');
+        return;
+    }
+    
     if (!confirm('Are you sure you want to delete this product?')) {
         return;
     }
@@ -2791,10 +3136,14 @@ document.getElementById('search-btn').addEventListener('click', () => {
         const daysUntilExpiry = Math.ceil((expiryDate - today) / (1000 * 60 * 60 * 24));
         
         let expiryWarning = '';
+        let productNameStyle = '';
+        
         if (daysUntilExpiry < 0) {
             expiryWarning = `<div class="expiry-warning"><i class="fas fa-exclamation-triangle"></i> Expired</div>`;
+            productNameStyle = 'style="color: red; font-weight: bold;"';
         } else if (daysUntilExpiry <= settings.expiryWarningDays) {
             expiryWarning = `<div class="expiry-warning"><i class="fas fa-clock"></i> Expires in ${daysUntilExpiry} days</div>`;
+            productNameStyle = 'style="color: red; font-weight: bold;"';
         }
         
         // Check stock status
@@ -2809,7 +3158,7 @@ document.getElementById('search-btn').addEventListener('click', () => {
             <div class="product-img">
                 <i class="fas fa-box"></i>
             </div>
-            <h4>${product.name}</h4>
+            <h4 ${productNameStyle}>${product.name}</h4>
             <div class="price">${formatCurrency(product.price)}</div>
             <div class="stock ${stockClass}">Stock: ${product.stock}</div>
             ${expiryWarning}
@@ -2862,6 +3211,7 @@ document.getElementById('inventory-search-btn').addEventListener('click', () => 
         let rowClass = '';
         let stockBadgeClass = 'stock-high';
         let stockBadgeText = 'In Stock';
+        let productNameStyle = '';
         
         if (product.stock <= 0) {
             stockBadgeClass = 'stock-low';
@@ -2878,18 +3228,37 @@ document.getElementById('inventory-search-btn').addEventListener('click', () => 
             expiryBadgeClass = 'expiry-expired';
             expiryBadgeText = 'Expired';
             rowClass = 'expired';
+            productNameStyle = 'style="color: red; font-weight: bold;"';
         } else if (daysUntilExpiry <= settings.expiryWarningDays) {
             expiryBadgeClass = 'expiry-warning';
             expiryBadgeText = 'Expiring Soon';
             rowClass = 'expiring-soon';
+            productNameStyle = 'style="color: red; font-weight: bold;"';
         }
         
         const row = document.createElement('tr');
         if (rowClass) row.className = rowClass;
         
+        // Build action buttons based on user role
+        let actionButtons = '';
+        if (AuthModule.isAdmin()) {
+            actionButtons = `
+                <div class="action-buttons">
+                    <button class="btn-edit" onclick="editProduct('${product.id}')">
+                        <i class="fas fa-edit"></i>
+                    </button>
+                    <button class="btn-delete" onclick="deleteProduct('${product.id}')">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                </div>
+            `;
+        } else {
+            actionButtons = '<span class="no-permission">Admin only</span>';
+        }
+        
         row.innerHTML = `
             <td>${product.id}</td>
-            <td>${product.name}</td>
+            <td ${productNameStyle}>${product.name}</td>
             <td>${product.category}</td>
             <td>${formatCurrency(product.price)}</td>
             <td>${product.stock}</td>
@@ -2899,14 +3268,7 @@ document.getElementById('inventory-search-btn').addEventListener('click', () => 
                 <span class="expiry-badge ${expiryBadgeClass}">${expiryBadgeText}</span>
             </td>
             <td>
-                <div class="action-buttons">
-                    <button class="btn-edit" onclick="editProduct('${product.id}')">
-                        <i class="fas fa-edit"></i>
-                    </button>
-                    <button class="btn-delete" onclick="deleteProduct('${product.id}')">
-                        <i class="fas fa-trash"></i>
-                    </button>
-                </div>
+                ${actionButtons}
             </td>
         `;
         
@@ -3132,6 +3494,14 @@ async function init() {
                         }
                         
                         showApp();
+                        
+                        // Process sync queue if online
+                        if (isOnline && syncQueue.length > 0) {
+                            setTimeout(() => {
+                                processSyncQueue();
+                            }, 2000);
+                        }
+                        
                         return;
                     }
                 } catch (e) {
@@ -3160,6 +3530,14 @@ async function init() {
                     deletedSales = await DataModule.fetchDeletedSales();
                     
                     showApp();
+                    
+                    // Process sync queue if online
+                    if (isOnline && syncQueue.length > 0) {
+                        setTimeout(() => {
+                            processSyncQueue();
+                        }, 2000);
+                    }
+                    
                     return;
                 } else {
                     console.warn('⚠️ DEBUG: Error fetching user data:', userError?.message || 'User not found');
@@ -3196,6 +3574,14 @@ async function init() {
                 deletedSales = await DataModule.fetchDeletedSales();
                 
                 showApp();
+                
+                // Process sync queue if online
+                if (isOnline && syncQueue.length > 0) {
+                    setTimeout(() => {
+                        processSyncQueue();
+                    }, 2000);
+                }
+                
                 return;
             }
         }
@@ -3233,6 +3619,13 @@ async function init() {
             deletedSales = await DataModule.fetchDeletedSales();
             
             showApp();
+            
+            // Process sync queue if online
+            if (isOnline && syncQueue.length > 0) {
+                setTimeout(() => {
+                    processSyncQueue();
+                }, 2000);
+            }
         } else {
             showLogin();
         }
