@@ -932,11 +932,9 @@ const DataModule = {
                     
                     // Normalize the data to ensure consistent field names
                     const normalizedProducts = data.map(product => {
-                        // Handle different possible column names for expiry date
-                        if (product.expiry_date && !product.expiryDate) {
-                            product.expiryDate = product.expiry_date;
-                        } else if (product.expiryDate && !product.expiry_date) {
-                            product.expiry_date = product.expiryDate;
+                        // Handle the lowercase expirydate field from Supabase
+                        if (product.expirydate && !product.expiryDate) {
+                            product.expiryDate = product.expirydate;
                         }
                         
                         return product;
@@ -986,8 +984,18 @@ const DataModule = {
             }
             
             if (data) {
+                // Normalize the data to ensure consistent field names
+                const normalizedProducts = data.map(product => {
+                    // Handle the lowercase expirydate field from Supabase
+                    if (product.expirydate && !product.expiryDate) {
+                        product.expiryDate = product.expirydate;
+                    }
+                    
+                    return product;
+                });
+                
                 // Filter out deleted products locally
-                const activeProducts = data.filter(product => !product.deleted);
+                const activeProducts = normalizedProducts.filter(product => !product.deleted);
                 products = activeProducts;
                 saveToLocalStorage();
                 return products;
@@ -1072,7 +1080,7 @@ const DataModule = {
         }
     },
     
-    // ✅ FIXED: Simplified and more reliable saveProduct function
+    // ✅ FIXED: Simplified and more reliable saveProduct function with correct field name
     async saveProduct(product) {
         console.log('🔍 DEBUG: saveProduct called with:', product);
         
@@ -1096,13 +1104,13 @@ const DataModule = {
             
             console.log('✅ DEBUG: Product validation passed');
             
-            // Prepare product data for Supabase with correct field names
+            // Prepare product data for Supabase with CORRECT field name
             const productToSave = {
                 name: product.name,
                 category: product.category,
                 price: parseFloat(product.price),
                 stock: parseInt(product.stock),
-                expiry_date: product.expiryDate,  // Fixed: Use expiry_date for Supabase
+                expirydate: product.expiryDate,  // FIXED: Use lowercase 'expirydate' to match database
                 barcode: product.barcode || null
             };
             
@@ -1659,8 +1667,8 @@ function validateProductData(product) {
     validatedProduct.price = parseFloat(validatedProduct.price);
     validatedProduct.stock = parseInt(validatedProduct.stock);
     
-    // Add the expiry_date field for Supabase compatibility
-    validatedProduct.expiry_date = validatedProduct.expiryDate;
+    // Add the expirydate field for Supabase compatibility
+    validatedProduct.expirydate = validatedProduct.expiryDate;
     
     return validatedProduct;
 }
@@ -2042,7 +2050,7 @@ function loadAccount() {
         accountLoading.style.display = 'none';
         
         if (currentUser) {
-            date.getElementById('user-name').textContent = currentUser.name;
+            document.getElementById('user-name').textContent = currentUser.name;
             document.getElementById('user-email').textContent = currentUser.email;
             document.getElementById('user-role-display').textContent = currentUser.role;
             document.getElementById('user-created').textContent = formatDate(currentUser.created_at);
