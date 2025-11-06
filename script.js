@@ -2373,7 +2373,10 @@ async function saveProduct() {
     
     if (result.success) {
         closeProductModal();
+        // ✅ FIXED: Force refresh the products list immediately
+        products = await DataModule.fetchProducts();
         loadProducts();
+        
         if (currentPage === 'inventory') {
             loadInventory();
         }
@@ -2398,7 +2401,10 @@ async function deleteProduct(productId) {
     const result = await DataModule.deleteProduct(productId);
     
     if (result.success) {
+        // ✅ FIXED: Force refresh the products list immediately
+        products = await DataModule.fetchProducts();
         loadProducts();
+        
         if (currentPage === 'inventory') {
             loadInventory();
         }
@@ -2445,13 +2451,14 @@ async function deleteSale(saleId) {
         if (result.success) {
             showNotification('Sale deleted successfully', 'success');
             
+            // ✅ FIXED: Force refresh the sales list immediately
+            sales = await DataModule.fetchSales();
+            updateSalesTables();
+            
             // Refresh the reports if we're on the reports page
             if (currentPage === 'reports') {
                 generateReport();
             }
-            
-            // Update sales tables
-            updateSalesTables();
         } else {
             showNotification('Failed to delete sale', 'error');
         }
