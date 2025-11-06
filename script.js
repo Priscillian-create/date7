@@ -1,5 +1,4 @@
-// FIX: Register service worker for offline functionality
-// Only register service worker if not in StackBlitz environment
+// Service Worker Registration
 if ('serviceWorker' in navigator && !window.location.hostname.includes('stackblitz')) {
     window.addEventListener('load', () => {
         navigator.serviceWorker.register('./service-worker.js')
@@ -25,19 +24,25 @@ const MAX_RETRY_ATTEMPTS = 3;
 const RETRY_DELAY = 5000; // 5 seconds
 
 // Initialize Supabase
-const supabaseUrl = 'https://ieriphdzlbuzqqwrymwn.supabase.co'; // Replace with your Supabase URL
-const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImllcmlwaGR6bGJ1enFxd3J5bXduIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjIzMDU1MTgsImV4cCI6MjA3Nzg4MTUxOH0.bvbs6joSxf1u9U8SlaAYmjve-N6ArNYcNMtnG6-N_HU'; // Replace with your Supabase anon key
+const supabaseUrl = 'https://ieriphdzlbuzqqwrymwn.supabase.co';
+const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImllcmlwaGR6bGJ1enFxd3J5bXduIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjIzMDU1MTgsImV4cCI6MjA3Nzg4MTUxOH0.bvbs6joSxf1u9U8SlaAYmjve-N6ArNYcNMtnG6-N_HU';
 const supabase = window.supabase.createClient(supabaseUrl, supabaseKey);
 
-// FIX: Add connection retry logic with enhanced error handling
+// Connection retry logic with enhanced error handling
 function checkSupabaseConnection() {
-    if (!isOnline) return;
+    if (!isOnline) {
+        updateConnectionStatus('offline', 'Offline');
+        return;
+    }
+    
+    updateConnectionStatus('checking', 'Checking connection...');
     
     // Try a simple read operation to check connection
     supabase.from('products').select('count').limit(1)
         .then(() => {
             console.log('Supabase connection is working');
             connectionRetryCount = 0;
+            updateConnectionStatus('online', 'Connected');
             
             // Process any pending sync operations
             if (syncQueue.length > 0) {
@@ -46,6 +51,7 @@ function checkSupabaseConnection() {
         })
         .catch(error => {
             console.error('Supabase connection check failed:', error);
+            updateConnectionStatus('offline', 'Connection failed');
             
             // Check if it's an RLS policy error
             if (error.code === '42P17' || error.message.includes('infinite recursion')) {
@@ -64,6 +70,17 @@ function checkSupabaseConnection() {
                 showNotification('Connection to database failed. Some features may be limited.', 'warning');
             }
         });
+}
+
+// Update connection status
+function updateConnectionStatus(status, message) {
+    const statusEl = document.getElementById('connection-status');
+    const textEl = document.getElementById('connection-text');
+    
+    if (statusEl && textEl) {
+        statusEl.className = 'connection-status ' + status;
+        textEl.textContent = message;
+    }
 }
 
 // PWA Install Prompt Setup
@@ -110,26 +127,50 @@ window.addEventListener('offline', () => {
     offlineIndicator.classList.add('show');
 });
 
-// ✅ NEW: Function to refresh all data when coming back online
+// Enhanced refreshAllData function
 async function refreshAllData() {
     console.log('🔄 Refreshing all data after reconnection...');
     
     try {
         // Show sync status
-        syncStatus.classList.add('show', 'syncing');
-        syncStatusText.textContent = 'Syncing all data...';
+        if (syncStatus) {
+            syncStatus.classList.add('show', 'syncing');
+            syncStatusText.textContent = 'Syncing all data...';
+        }
         
-        // Fetch fresh data from Supabase
-        const [newProducts, newSales, newDeletedSales] = await Promise.all([
-            DataModule.fetchProducts(),
-            DataModule.fetchSales(),
-            DataModule.fetchDeletedSales()
-        ]);
+        // Fetch fresh data from Supabase with error handling
+        let newProducts = [];
+        let newSales = [];
+        let newDeletedSales = [];
+        
+        try {
+            newProducts = await DataModule.fetchProducts();
+        } catch (error) {
+            console.error('Error fetching products:', error);
+            newProducts = products; // Use existing data
+        }
+        
+        try {
+            newSales = await DataModule.fetchSales();
+        } catch (error) {
+            console.error('Error fetching sales:', error);
+            newSales = sales; // Use existing data
+        }
+        
+        try {
+            newDeletedSales = await DataModule.fetchDeletedSales();
+        } catch (error) {
+            console.error('Error fetching deleted sales:', error);
+            newDeletedSales = deletedSales; // Use existing data
+        }
         
         // Update global variables
         products = newProducts;
         sales = newSales;
         deletedSales = newDeletedSales;
+        
+        // Validate sales data
+        validateSalesData();
         
         // Save to localStorage
         saveToLocalStorage();
@@ -151,24 +192,30 @@ async function refreshAllData() {
             await processSyncQueue();
         }
         
-        syncStatus.classList.remove('syncing');
-        syncStatus.classList.add('show');
-        syncStatusText.textContent = 'All data synced';
-        setTimeout(() => syncStatus.classList.remove('show'), 3000);
+        if (syncStatus) {
+            syncStatus.classList.remove('syncing');
+            syncStatus.classList.add('show');
+            syncStatusText.textContent = 'All data synced';
+            setTimeout(() => syncStatus.classList.remove('show'), 3000);
+        }
         
         showNotification('All data synchronized successfully!', 'success');
         
     } catch (error) {
         console.error('Error refreshing data:', error);
-        syncStatus.classList.remove('syncing');
-        syncStatus.classList.add('error');
-        syncStatusText.textContent = 'Sync error';
-        setTimeout(() => syncStatus.classList.remove('show', 'error'), 3000);
+        
+        if (syncStatus) {
+            syncStatus.classList.remove('syncing');
+            syncStatus.classList.add('error');
+            syncStatusText.textContent = 'Sync error';
+            setTimeout(() => syncStatus.classList.remove('show', 'error'), 3000);
+        }
+        
         showNotification('Error syncing data. Please try again.', 'error');
     }
 }
 
-// ✅ FIXED: Improved addToSyncQueue() - better duplicate detection and offline handling
+// Improved addToSyncQueue() - better duplicate detection and offline handling
 function addToSyncQueue(operation) {
     console.log('🔄 Adding to sync queue:', operation.type, operation.data?.id || operation.data?.receiptNumber);
     
@@ -250,7 +297,7 @@ function addToSyncQueue(operation) {
     }
 }
 
-// ✅ FIXED: Improved processSyncQueue() - better error handling and retry logic
+// Improved processSyncQueue() - better error handling and retry logic
 async function processSyncQueue() {
     if (syncQueue.length === 0) {
         console.log('✅ Sync queue is empty');
@@ -334,7 +381,7 @@ async function processSyncQueue() {
     }
 }
 
-// ✅ NEW: Individual sync functions for better error handling
+// Individual sync functions for better error handling
 async function syncSale(operation) {
     try {
         // Check if sale already exists by receipt number
@@ -537,7 +584,7 @@ function cleanupSyncQueue() {
     localStorage.setItem('syncQueue', JSON.stringify(syncQueue));
 }
 
-// ✅ FIXED: Add function to clean up duplicate sales on app startup
+// Add function to clean up duplicate sales on app startup
 function cleanupDuplicateSales() {
     const receiptNumbers = new Set();
     const uniqueSales = [];
@@ -558,7 +605,7 @@ function cleanupDuplicateSales() {
     }
 }
 
-// ✅ FIXED: Add function to set up real-time listeners properly
+// Add function to set up real-time listeners properly
 function setupRealtimeListeners() {
     // Products listener
     if (isOnline) {
@@ -617,11 +664,11 @@ let users = [];
 let currentUser = null;
 let currentPage = "pos";
 
-// Settings - Updated phone number as requested
+// Settings
 let settings = {
     storeName: "Pa Gerrys Mart",
     storeAddress: "Alatishe, Ibeju Lekki, Lagos State, Nigeria",
-    storePhone: "+2347037850121", // Changed phone number as requested
+    storePhone: "+2347037850121",
     lowStockThreshold: 10,
     expiryWarningDays: 90 // 3 months = 90 days
 };
@@ -636,7 +683,7 @@ const STORAGE_KEYS = {
     CURRENT_USER: 'pagerrysmart_current_user'
 };
 
-// ✅ FIXED: Improved loadFromLocalStorage with better error handling
+// Improved loadFromLocalStorage with better error handling
 function loadFromLocalStorage() {
     try {
         // Load products
@@ -723,7 +770,7 @@ function loadFromLocalStorage() {
     }
 }
 
-// ✅ FIXED: Improved saveToLocalStorage with better error handling
+// Improved saveToLocalStorage with better error handling
 function saveToLocalStorage() {
     try {
         localStorage.setItem(STORAGE_KEYS.PRODUCTS, JSON.stringify(products));
@@ -743,7 +790,7 @@ function saveToLocalStorage() {
     }
 }
 
-// ✅ NEW: Add data validation function
+// Add data validation function
 function validateDataStructure() {
     let isValid = true;
     
@@ -796,42 +843,57 @@ function validateDataStructure() {
     return isValid;
 }
 
-// ✅ NEW: Add data recovery function
-function recoverLostData() {
-    console.log('Attempting to recover lost data...');
+// Add sales data validation function
+function validateSalesData() {
+    console.log('🔍 DEBUG: Validating sales data...');
     
-    // Try to recover from localStorage
-    try {
-        const savedProducts = localStorage.getItem(STORAGE_KEYS.PRODUCTS);
-        if (savedProducts) {
-            const parsedProducts = JSON.parse(savedProducts);
-            if (Array.isArray(parsedProducts) && parsedProducts.length > 0) {
-                products = parsedProducts;
-                console.log(`Recovered ${products.length} products from localStorage`);
-            }
-        }
-        
-        const savedSales = localStorage.getItem(STORAGE_KEYS.SALES);
-        if (savedSales) {
-            const parsedSales = JSON.parse(savedSales);
-            if (Array.isArray(parsedSales) && parsedSales.length > 0) {
-                sales = parsedSales;
-                console.log(`Recovered ${sales.length} sales from localStorage`);
-            }
-        }
-        
-        // Save the recovered data
-        saveToLocalStorage();
-        
-        // Update the UI
-        loadProducts();
-        loadSales();
-        
-        showNotification('Data recovery completed', 'success');
-    } catch (e) {
-        console.error('Error during data recovery:', e);
-        showNotification('Data recovery failed', 'error');
+    let isValid = true;
+    const issues = [];
+    
+    // Check if sales is an array
+    if (!Array.isArray(sales)) {
+        issues.push('Sales data is not an array');
+        sales = [];
+        isValid = false;
     }
+    
+    // Check each sale for required fields
+    sales.forEach((sale, index) => {
+        if (!sale || typeof sale !== 'object') {
+            issues.push(`Sale at index ${index} is not a valid object`);
+            isValid = false;
+            return;
+        }
+        
+        if (!sale.receiptNumber) {
+            issues.push(`Sale at index ${index} is missing receipt number`);
+            isValid = false;
+        }
+        
+        if (!sale.created_at) {
+            issues.push(`Sale at index ${index} is missing created date`);
+            isValid = false;
+        }
+        
+        if (typeof sale.total !== 'number' || isNaN(sale.total)) {
+            issues.push(`Sale at index ${index} has invalid total: ${sale.total}`);
+            isValid = false;
+        }
+        
+        if (!Array.isArray(sale.items)) {
+            issues.push(`Sale at index ${index} has invalid items array`);
+            isValid = false;
+        }
+    });
+    
+    if (!isValid) {
+        console.warn('⚠️ DEBUG: Sales data validation failed:', issues);
+        showNotification('Sales data validation failed. Some data may be missing.', 'warning');
+    } else {
+        console.log('✅ DEBUG: Sales data validation passed');
+    }
+    
+    return isValid;
 }
 
 // DOM elements
@@ -1083,7 +1145,7 @@ const AuthModule = {
         return currentUser && currentUser.role === 'admin';
     },
     
-    // ✅ FIXED: Enhanced onAuthStateChanged with proper session handling
+    // Enhanced onAuthStateChanged with proper session handling
     onAuthStateChanged(callback) {
         // First check for existing session
         supabase.auth.getSession().then(({ data: { session } }) => {
@@ -1109,7 +1171,7 @@ const AuthModule = {
         });
     },
     
-    // ✅ NEW: Helper method to handle existing session
+    // Helper method to handle existing session
     async handleExistingSession(session, callback) {
         // Create a basic user object from auth data as a fallback
         const fallbackUser = {
@@ -1174,7 +1236,7 @@ const AuthModule = {
     }
 };
 
-// ✅ NEW: Add session refresh mechanism
+// Add session refresh mechanism
 async function refreshSession() {
     try {
         const { data, error } = await supabase.auth.refreshSession();
@@ -1191,9 +1253,9 @@ async function refreshSession() {
     }
 }
 
-// ✅ FIXED: Data Module with improved error handling
+// Data Module with improved error handling
 const DataModule = {
-    // ✅ FIXED: More flexible fetchProducts function with merge logic
+    // More flexible fetchProducts function with merge logic
     async fetchProducts() {
         console.log('🔍 DEBUG: fetchProducts called');
         
@@ -1279,7 +1341,7 @@ const DataModule = {
         }
     },
     
-    // ✅ NEW: Helper function to merge product data
+    // Helper function to merge product data
     mergeProductData(serverProducts) {
         // Create a map of server products by ID for quick lookup
         const serverProductsMap = {};
@@ -1328,7 +1390,7 @@ const DataModule = {
         return mergedProducts;
     },
     
-    // ✅ NEW: Fallback function to fetch all products
+    // Fallback function to fetch all products
     async fetchAllProducts() {
         console.log('🔄 DEBUG: Fetching all products without deleted filter');
         
@@ -1368,7 +1430,7 @@ const DataModule = {
         }
     },
     
-    // ✅ FIXED: Enhanced fetchSales function with better error handling and data preservation
+    // Enhanced fetchSales function with better error handling and data preservation
     async fetchSales() {
         console.log('🔍 DEBUG: fetchSales called');
         
@@ -1376,48 +1438,84 @@ const DataModule = {
             if (isOnline) {
                 console.log('🌐 DEBUG: Online, fetching from Supabase');
                 
-                const { data, error } = await supabase
+                // Add timeout to prevent hanging
+                const timeoutPromise = new Promise((_, reject) => 
+                    setTimeout(() => reject(new Error('Request timeout')), 10000)
+                );
+                
+                const fetchPromise = supabase
                     .from('sales')
-                    .select('*');
+                    .select('*')
+                    .order('created_at', { ascending: false });
+                
+                const { data, error } = await Promise.race([fetchPromise, timeoutPromise]);
                 
                 console.log('📥 DEBUG: Supabase response:', { data, error });
                 
                 if (error) {
                     console.error('❌ DEBUG: Supabase fetch error:', error);
                     
-                    // Check if it's an RLS policy error
+                    // Check for specific error types
                     if (error.code === '42P17' || error.message.includes('infinite recursion')) {
-                        console.warn('⚠️ DEBUG: Infinite recursion detected in sales table policy, using local data');
-                        showNotification('Database policy issue detected for sales. Using local cache.', 'warning');
+                        console.warn('⚠️ DEBUG: Infinite recursion detected in sales table policy');
+                        showNotification('Database policy issue for sales. Using local cache.', 'warning');
                     } else if (error.code === '42501' || error.message.includes('policy')) {
-                        console.warn('⚠️ DEBUG: Permission denied for sales table, using local data');
+                        console.warn('⚠️ DEBUG: Permission denied for sales table');
                         showNotification('Permission denied for sales. Using local cache.', 'warning');
                     } else {
                         throw error;
                     }
-                } else if (data) {
+                } else if (data && Array.isArray(data)) {
                     console.log('✅ DEBUG: Successfully fetched sales from Supabase:', data.length, 'items');
                     
-                    // Create a map of existing sales by receipt number for quick lookup
-                    const existingSalesByReceipt = {};
-                    sales.forEach(sale => {
-                        existingSalesByReceipt[sale.receiptNumber] = sale;
+                    // Validate and normalize sales data
+                    const validatedSales = data.map(sale => {
+                        // Ensure required fields exist
+                        if (!sale.receiptNumber) {
+                            console.warn('Sale missing receipt number:', sale);
+                            sale.receiptNumber = sale.receipt_number || `UNKNOWN_${Date.now()}`;
+                        }
+                        
+                        if (!sale.items) {
+                            console.warn('Sale missing items:', sale);
+                            sale.items = [];
+                        }
+                        
+                        if (typeof sale.total !== 'number') {
+                            console.warn('Sale has invalid total:', sale);
+                            sale.total = parseFloat(sale.total) || 0;
+                        }
+                        
+                        if (!sale.created_at) {
+                            console.warn('Sale missing created_at:', sale);
+                            sale.created_at = new Date().toISOString();
+                        }
+                        
+                        return sale;
                     });
                     
-                    // Merge new data with existing data, preserving any local-only sales
+                    // Create a map of existing local sales by receipt number
+                    const localSalesByReceipt = {};
+                    sales.forEach(sale => {
+                        if (sale && sale.receiptNumber) {
+                            localSalesByReceipt[sale.receiptNumber] = sale;
+                        }
+                    });
+                    
+                    // Merge server data with local data
                     const mergedSales = [];
                     const processedReceipts = new Set();
                     
-                    // Add sales from Supabase
-                    data.forEach(sale => {
-                        mergedSales.push(sale);
-                        processedReceipts.add(sale.receiptNumber);
+                    // Add server sales first
+                    validatedSales.forEach(serverSale => {
+                        mergedSales.push(serverSale);
+                        processedReceipts.add(serverSale.receiptNumber);
                     });
                     
-                    // Add any local sales that aren't in Supabase yet
-                    sales.forEach(sale => {
-                        if (!processedReceipts.has(sale.receiptNumber)) {
-                            mergedSales.push(sale);
+                    // Add local sales that aren't on server yet
+                    sales.forEach(localSale => {
+                        if (localSale && localSale.receiptNumber && !processedReceipts.has(localSale.receiptNumber)) {
+                            mergedSales.push(localSale);
                         }
                     });
                     
@@ -1428,7 +1526,7 @@ const DataModule = {
                         return dateB - dateA;
                     });
                     
-                    // Update global sales variable with merged data
+                    // Update global sales variable
                     sales = mergedSales;
                     saveToLocalStorage();
                     console.log('💾 DEBUG: Merged sales saved to localStorage');
@@ -1444,7 +1542,9 @@ const DataModule = {
             console.error('❌ DEBUG: Error in fetchSales:', error);
             
             // Show appropriate error message
-            if (error.code === '42501' || error.message.includes('policy')) {
+            if (error.message === 'Request timeout') {
+                showNotification('Connection timeout. Using local cache.', 'warning');
+            } else if (error.code === '42501' || error.message.includes('policy')) {
                 showNotification('Permission denied for sales. Using local cache.', 'warning');
             } else if (error.code === '42P17' || error.message.includes('infinite recursion')) {
                 showNotification('Database policy issue detected. Using local cache.', 'warning');
@@ -1457,7 +1557,7 @@ const DataModule = {
         }
     },
     
-    // NEW: Fetch deleted sales from Supabase
+    // Fetch deleted sales from Supabase
     async fetchDeletedSales() {
         try {
             if (isOnline) {
@@ -1485,7 +1585,7 @@ const DataModule = {
         }
     },
     
-    // ✅ FIXED: Simplified and more reliable saveProduct function with correct field name
+    // Simplified and more reliable saveProduct function with correct field name
     async saveProduct(product) {
         console.log('🔍 DEBUG: saveProduct called with:', product);
         
@@ -1643,7 +1743,7 @@ const DataModule = {
         return { success: true, product };
     },
     
-    // ✅ FIXED: Updated deleteProduct function
+    // Updated deleteProduct function
     async deleteProduct(productId) {
         try {
             // Always mark as deleted locally first
@@ -1714,7 +1814,7 @@ const DataModule = {
         }
     },
     
-    // ✅ FIXED: Improved saveSale function with better error handling
+    // Improved saveSale function with better error handling
     async saveSale(sale) {
         try {
             // Check if sale with this receipt number already exists locally
@@ -1808,7 +1908,7 @@ const DataModule = {
         return { success: true, sale };
     },
     
-    // FIX: Improved deleteSale function
+    // Improved deleteSale function
     async deleteSale(saleId) {
         try {
             // Always mark as deleted locally first
@@ -1898,7 +1998,7 @@ function showLogin() {
     appContainer.style.display = 'none';
 }
 
-// ✅ FIXED: Initialize change password form with username field for accessibility
+// Initialize change password form with username field for accessibility
 function initChangePasswordForm() {
     if (currentUser && currentUser.email) {
         // Create a hidden username field for accessibility
@@ -1923,7 +2023,7 @@ function initChangePasswordForm() {
     }
 }
 
-// ✅ FIXED: Updated showApp function
+// Updated showApp function
 async function showApp() {
     loginPage.style.display = 'none';
     appContainer.style.display = 'flex';
@@ -2009,7 +2109,7 @@ function formatCurrency(amount) {
     }).format(amount);
 }
 
-// FIX: Added null check for toDate() function
+// Added null check for toDate() function
 function formatDate(date) {
     if (!date) return '-';
     
@@ -2088,7 +2188,7 @@ function showPage(pageName) {
     }
 }
 
-// ✅ FIXED: Add function to validate and fix product data
+// Add function to validate and fix product data
 function validateProductData(product) {
     const validatedProduct = { ...product };
     
@@ -2276,7 +2376,7 @@ function loadInventory() {
     }, 500);
 }
 
-// ✅ FIXED: Enhanced loadSales function with better debugging
+// Enhanced loadSales function with better debugging
 function loadSales() {
     console.log('🔄 DEBUG: loadSales called, current sales count:', sales.length);
     
@@ -2294,7 +2394,7 @@ function loadDeletedSales() {
     updateSalesTables();
 }
 
-// ✅ FIXED: Enhanced updateSalesTables function with delete button
+// Enhanced updateSalesTables function with delete button
 function updateSalesTables() {
     console.log('🔄 DEBUG: updateSalesTables called');
     
@@ -2310,7 +2410,7 @@ function updateSalesTables() {
         
         // Sort sales by date (newest first)
         const sortedSales = [...sales].sort((a, b) => {
-            // FIX: Added null checks for toDate()
+            // Added null checks for toDate()
             const dateA = a.created_at ? new Date(a.created_at) : new Date(0);
             const dateB = b.created_at ? new Date(b.created_at) : new Date(0);
             return dateB - dateA;
@@ -2369,7 +2469,7 @@ function updateSalesTables() {
         
         // Sort deleted sales by date (newest first)
         const sortedDeletedSales = [...deletedSales].sort((a, b) => {
-            // FIX: Added null checks for toDate()
+            // Added null checks for toDate()
             const dateA = a.deletedAt ? new Date(a.deletedAt) : new Date(0);
             const dateB = b.deletedAt ? new Date(b.deletedAt) : new Date(0);
             return dateB - dateA;
@@ -2394,120 +2494,190 @@ function updateSalesTables() {
     }
 }
 
+// Enhanced loadReports function
 function loadReports() {
     reportsLoading.style.display = 'flex';
     
     // Set today's date as default
     const today = new Date().toISOString().split('T')[0];
-    document.getElementById('report-date').value = today;
+    const reportDateEl = document.getElementById('report-date');
+    if (reportDateEl) {
+        reportDateEl.value = today;
+    }
     
+    // Use a timeout to ensure loading state is visible
     setTimeout(() => {
         reportsLoading.style.display = 'none';
-        generateReport();
+        
+        // Ensure we have sales data before generating report
+        if (sales.length === 0) {
+            console.log('📊 DEBUG: No sales data, attempting to fetch...');
+            DataModule.fetchSales().then(fetchedSales => {
+                sales = fetchedSales;
+                generateReport();
+            }).catch(error => {
+                console.error('Error fetching sales for report:', error);
+                generateReport(); // Generate with empty data
+            });
+        } else {
+            generateReport();
+        }
     }, 500);
 }
 
-// FIX: Added null checks for toDate() in generateReport
+// Enhanced generateReport function with better error handling
 function generateReport() {
-    const selectedDate = document.getElementById('report-date').value;
-    
-    // Calculate overall summary
-    let totalSales = 0;
-    let totalTransactions = sales.length;
-    let totalItemsSold = 0;
-    
-    sales.forEach(sale => {
-        totalSales += sale.total;
-        // Sum up the quantities of all items in the sale
-        sale.items.forEach(item => {
-            totalItemsSold += item.quantity;
-        });
-    });
-    
-    document.getElementById('report-total-sales').textContent = formatCurrency(totalSales);
-    document.getElementById('report-transactions').textContent = totalTransactions;
-    document.getElementById('report-items-sold').textContent = totalItemsSold;
-    
-    // Calculate daily summary
-    let dailyTotal = 0;
-    let dailyTransactions = 0;
-    let dailyItems = 0;
-    
-    const dailySales = [];
-    
-    sales.forEach(sale => {
-        const saleDate = sale.created_at ? new Date(sale.created_at) : new Date(0);
-        const saleDateString = saleDate.toISOString().split('T')[0];
+    try {
+        const selectedDate = document.getElementById('report-date').value;
         
-        if (saleDateString === selectedDate) {
-            dailyTotal += sale.total;
-            dailyTransactions++;
-            // Sum up the quantities of all items in the sale
-            sale.items.forEach(item => {
-                dailyItems += item.quantity;
-            });
-            dailySales.push(sale);
-        }
-    });
-    
-    document.getElementById('daily-total-sales').textContent = formatCurrency(dailyTotal);
-    document.getElementById('daily-transactions').textContent = dailyTransactions;
-    document.getElementById('daily-items-sold').textContent = dailyItems;
-    
-    // Update daily sales table
-    if (dailySales.length === 0) {
-        dailySalesTableBody.innerHTML = `
-            <tr>
-                <td colspan="5" class="no-data">No sales data for selected date</td>
-            </tr>
-        `;
-    } else {
-        dailySalesTableBody.innerHTML = '';
+        // Ensure we have valid sales data
+        const salesData = Array.isArray(sales) ? sales : [];
+        console.log('📊 DEBUG: Generating report with', salesData.length, 'sales');
         
-        // Sort by time
-        dailySales.sort((a, b) => {
-            // FIX: Added null checks for toDate()
-            const dateA = a.created_at ? new Date(a.created_at) : new Date(0);
-            const dateB = b.created_at ? new Date(b.created_at) : new Date(0);
-            return dateB - dateA;
-        });
+        // Calculate overall summary
+        let totalSales = 0;
+        let totalTransactions = 0;
+        let totalItemsSold = 0;
         
-        dailySales.forEach(sale => {
-            const row = document.createElement('tr');
-            
-            // Build action buttons based on user role
-            let actionButtons = `
-                <button class="btn-edit" onclick="viewSale('${sale.id}')" title="View Sale">
-                    <i class="fas fa-eye"></i>
-                </button>
-            `;
-            
-            // Add delete button only for admins
-            if (AuthModule.isAdmin()) {
-                actionButtons += `
-                    <button class="btn-delete" onclick="deleteSale('${sale.id}')" title="Delete Sale">
-                        <i class="fas fa-trash"></i>
-                    </button>
-                `;
+        salesData.forEach(sale => {
+            // Skip invalid sales
+            if (!sale || typeof sale !== 'object') {
+                console.warn('Skipping invalid sale:', sale);
+                return;
             }
             
-            // Calculate total items sold (sum of quantities)
-            const totalItemsSold = sale.items.reduce((sum, item) => sum + item.quantity, 0);
+            totalSales += sale.total || 0;
+            totalTransactions++;
             
-            row.innerHTML = `
-                <td>${sale.receiptNumber}</td>
-                <td>${formatDate(sale.created_at)}</td>
-                <td>${totalItemsSold}</td>
-                <td>${formatCurrency(sale.total)}</td>
-                <td>
-                    <div class="action-buttons">
-                        ${actionButtons}
-                    </div>
-                </td>
-            `;
-            
-            dailySalesTableBody.appendChild(row);
+            // Sum up the quantities of all items in the sale
+            if (Array.isArray(sale.items)) {
+                sale.items.forEach(item => {
+                    totalItemsSold += item.quantity || 0;
+                });
+            }
         });
+        
+        // Update summary elements
+        const totalSalesEl = document.getElementById('report-total-sales');
+        const totalTransactionsEl = document.getElementById('report-transactions');
+        const totalItemsSoldEl = document.getElementById('report-items-sold');
+        
+        if (totalSalesEl) totalSalesEl.textContent = formatCurrency(totalSales);
+        if (totalTransactionsEl) totalTransactionsEl.textContent = totalTransactions;
+        if (totalItemsSoldEl) totalItemsSoldEl.textContent = totalItemsSold;
+        
+        // Calculate daily summary
+        let dailyTotal = 0;
+        let dailyTransactions = 0;
+        let dailyItems = 0;
+        
+        const dailySales = [];
+        
+        salesData.forEach(sale => {
+            // Skip invalid sales
+            if (!sale || typeof sale !== 'object' || !sale.created_at) {
+                return;
+            }
+            
+            const saleDate = new Date(sale.created_at);
+            
+            // Check if date is valid
+            if (isNaN(saleDate.getTime())) {
+                console.warn('Invalid sale date:', sale.created_at);
+                return;
+            }
+            
+            const saleDateString = saleDate.toISOString().split('T')[0];
+            
+            if (saleDateString === selectedDate) {
+                dailyTotal += sale.total || 0;
+                dailyTransactions++;
+                
+                // Sum up the quantities of all items in the sale
+                if (Array.isArray(sale.items)) {
+                    sale.items.forEach(item => {
+                        dailyItems += item.quantity || 0;
+                    });
+                }
+                dailySales.push(sale);
+            }
+        });
+        
+        // Update daily summary elements
+        const dailyTotalEl = document.getElementById('daily-total-sales');
+        const dailyTransactionsEl = document.getElementById('daily-transactions');
+        const dailyItemsEl = document.getElementById('daily-items-sold');
+        
+        if (dailyTotalEl) dailyTotalEl.textContent = formatCurrency(dailyTotal);
+        if (dailyTransactionsEl) dailyTransactionsEl.textContent = dailyTransactions;
+        if (dailyItemsEl) dailyItemsEl.textContent = dailyItems;
+        
+        // Update daily sales table
+        if (!dailySalesTableBody) {
+            console.error('dailySalesTableBody element not found');
+            return;
+        }
+        
+        if (dailySales.length === 0) {
+            dailySalesTableBody.innerHTML = `
+                <tr>
+                    <td colspan="5" class="no-data">No sales data for selected date</td>
+                </tr>
+            `;
+        } else {
+            dailySalesTableBody.innerHTML = '';
+            
+            // Sort by time (newest first)
+            dailySales.sort((a, b) => {
+                const dateA = a.created_at ? new Date(a.created_at) : new Date(0);
+                const dateB = b.created_at ? new Date(b.created_at) : new Date(0);
+                return dateB - dateA;
+            });
+            
+            dailySales.forEach(sale => {
+                const row = document.createElement('tr');
+                
+                // Build action buttons based on user role
+                let actionButtons = `
+                    <button class="btn-edit" onclick="viewSale('${sale.id}')" title="View Sale">
+                        <i class="fas fa-eye"></i>
+                    </button>
+                `;
+                
+                // Add delete button only for admins
+                if (AuthModule.isAdmin()) {
+                    actionButtons += `
+                        <button class="btn-delete" onclick="deleteSale('${sale.id}')" title="Delete Sale">
+                            <i class="fas fa-trash"></i>
+                        </button>
+                    `;
+                }
+                
+                // Calculate total items sold
+                const totalItemsSold = Array.isArray(sale.items) 
+                    ? sale.items.reduce((sum, item) => sum + (item.quantity || 0), 0)
+                    : 0;
+                
+                row.innerHTML = `
+                    <td>${sale.receiptNumber || 'N/A'}</td>
+                    <td>${formatDate(sale.created_at)}</td>
+                    <td>${totalItemsSold}</td>
+                    <td>${formatCurrency(sale.total || 0)}</td>
+                    <td>
+                        <div class="action-buttons">
+                            ${actionButtons}
+                        </div>
+                    </td>
+                `;
+                
+                dailySalesTableBody.appendChild(row);
+            });
+        }
+        
+        console.log('✅ DEBUG: Report generated successfully');
+    } catch (error) {
+        console.error('❌ DEBUG: Error generating report:', error);
+        showNotification('Error generating report: ' + error.message, 'error');
     }
 }
 
@@ -2658,7 +2828,7 @@ function clearCart() {
     updateCart();
 }
 
-// ✅ FIXED: Improved completeSale function with better error handling and stock sync
+// Improved completeSale function with better error handling and stock sync
 async function completeSale() {
     if (cart.length === 0) {
         showNotification('Cart is empty', 'error');
@@ -2729,7 +2899,7 @@ async function completeSale() {
     }
 }
 
-// ✅ NEW: Function to update product stock
+// Function to update product stock
 async function updateProductStock(productId, newStock) {
     try {
         // Update locally first
@@ -2872,7 +3042,7 @@ function closeProductModal() {
     productModal.style.display = 'none';
 }
 
-// ✅ FIXED: Updated saveProduct function with validation
+// Updated saveProduct function with validation
 async function saveProduct() {
     // Check if user is admin
     if (!AuthModule.isAdmin()) {
@@ -2901,7 +3071,7 @@ async function saveProduct() {
     
     if (result.success) {
         closeProductModal();
-        // ✅ FIXED: Force refresh the products list immediately
+        // Force refresh the products list immediately
         products = await DataModule.fetchProducts();
         loadProducts();
         
@@ -2941,7 +3111,7 @@ async function deleteProduct(productId) {
     const result = await DataModule.deleteProduct(productId);
     
     if (result.success) {
-        // ✅ FIXED: Force refresh the products list immediately
+        // Force refresh the products list immediately
         products = await DataModule.fetchProducts();
         loadProducts();
         
@@ -2961,7 +3131,7 @@ function viewSale(saleId) {
     }
 }
 
-// ✅ FIXED: Enhanced deleteSale function with better error handling
+// Enhanced deleteSale function with better error handling
 async function deleteSale(saleId) {
     // Double-check if user is admin
     if (!AuthModule.isAdmin()) {
@@ -2992,7 +3162,7 @@ async function deleteSale(saleId) {
         if (result.success) {
             showNotification('Sale deleted successfully', 'success');
             
-            // ✅ FIXED: Force refresh the sales list immediately
+            // Force refresh the sales list immediately
             sales = await DataModule.fetchSales();
             updateSalesTables();
             
@@ -3319,6 +3489,68 @@ document.getElementById('manual-sync-btn').addEventListener('click', () => {
     }
 });
 
+// Refresh report button
+document.getElementById('refresh-report-btn').addEventListener('click', async () => {
+    reportsLoading.style.display = 'flex';
+    
+    try {
+        // Force refresh all data
+        await refreshAllData();
+        
+        // Regenerate the report
+        generateReport();
+        
+        showNotification('Report data refreshed successfully', 'success');
+    } catch (error) {
+        console.error('Error refreshing report data:', error);
+        showNotification('Error refreshing report data', 'error');
+    } finally {
+        reportsLoading.style.display = 'none';
+    }
+});
+
+// Debug report button
+document.getElementById('debug-report-btn').addEventListener('click', () => {
+    console.log('=== SALES REPORT DEBUG ===');
+    console.log('Current sales data:', sales);
+    console.log('Number of sales:', sales.length);
+    console.log('Current page:', currentPage);
+    console.log('Is online:', isOnline);
+    
+    // Check for invalid sales
+    const invalidSales = sales.filter(sale => 
+        !sale || 
+        typeof sale !== 'object' || 
+        !sale.receiptNumber || 
+        !sale.created_at
+    );
+    
+    if (invalidSales.length > 0) {
+        console.warn('Found invalid sales:', invalidSales);
+    } else {
+        console.log('All sales appear to be valid');
+    }
+    
+    // Check report elements
+    const reportElements = {
+        'report-total-sales': document.getElementById('report-total-sales'),
+        'report-transactions': document.getElementById('report-transactions'),
+        'report-items-sold': document.getElementById('report-items-sold'),
+        'daily-total-sales': document.getElementById('daily-total-sales'),
+        'daily-transactions': document.getElementById('daily-transactions'),
+        'daily-items-sold': document.getElementById('daily-items-sold'),
+        'daily-sales-table-body': document.getElementById('daily-sales-table-body'),
+        'report-date': document.getElementById('report-date')
+    };
+    
+    console.log('Report elements status:');
+    Object.entries(reportElements).forEach(([id, element]) => {
+        console.log(`${id}:`, element ? 'found' : 'NOT FOUND');
+    });
+    
+    console.log('=== END SALES REPORT DEBUG ===');
+});
+
 // Modal close buttons
 document.querySelectorAll('.modal-close').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -3375,60 +3607,7 @@ document.getElementById('change-password-form').addEventListener('submit', async
     }
 });
 
-// ✅ NEW: Add recovery mechanism
-function attemptDatabaseRecovery() {
-    console.log('Attempting database recovery...');
-    
-    // Clear any potentially corrupted data
-    syncQueue = [];
-    localStorage.setItem('syncQueue', JSON.stringify(syncQueue));
-    
-    // Try to re-establish connection
-    checkSupabaseConnection();
-    
-    // Show notification to user
-    showNotification('Attempting to recover database connection...', 'info');
-}
-
-// ✅ NEW: Add recovery button event listener
-document.getElementById('recovery-btn')?.addEventListener('click', attemptDatabaseRecovery);
-
-// ✅ NEW: Test Supabase connection
-async function testSupabaseConnection() {
-    console.log('🧪 DEBUG: Testing Supabase connection...');
-    
-    try {
-        // Test 1: Simple connection test
-        const { data, error } = await supabase.from('products').select('count').limit(1);
-        console.log('🧪 DEBUG: Connection test result:', { data, error });
-        
-        if (error) {
-            console.error('❌ DEBUG: Connection test failed:', error);
-            showNotification('Supabase connection failed: ' + error.message, 'error');
-            return false;
-        }
-        
-        // Test 2: Test actual product fetch
-        const { data: products, error: fetchError } = await supabase.from('products').select('*').limit(5);
-        console.log('🧪 DEBUG: Product fetch test result:', { products, fetchError });
-        
-        if (fetchError) {
-            console.error('❌ DEBUG: Product fetch test failed:', fetchError);
-            showNotification('Product fetch failed: ' + fetchError.message, 'error');
-            return false;
-        }
-        
-        console.log('✅ DEBUG: Supabase connection is working!');
-        showNotification('Supabase connection is working!', 'success');
-        return true;
-    } catch (error) {
-        console.error('❌ DEBUG: Supabase connection test error:', error);
-        showNotification('Supabase connection error: ' + error.message, 'error');
-        return false;
-    }
-}
-
-// ✅ FIXED: Updated init function with proper session handling
+// Updated init function with proper session handling
 async function init() {
     console.log('🚀 DEBUG: App initialization started');
     
@@ -3441,6 +3620,9 @@ async function init() {
     
     // Clean up duplicate sales
     cleanupDuplicateSales();
+    
+    // Validate sales data
+    validateSalesData();
     
     // Clean up any already synced operations
     cleanupSyncQueue();
@@ -3478,9 +3660,13 @@ async function init() {
                             try {
                                 sales = await DataModule.fetchSales();
                                 console.log('💰 DEBUG: Fetched sales from Supabase:', sales.length);
+                                validateSalesData();
                             } catch (error) {
                                 console.error('❌ DEBUG: Error fetching sales from Supabase:', error);
                             }
+                        } else {
+                            // Validate existing sales data
+                            validateSalesData();
                         }
                         
                         if (deletedSales.length === 0) {
@@ -3526,6 +3712,7 @@ async function init() {
                     products = await DataModule.fetchProducts();
                     console.log('💰 DEBUG: Fetching sales from Supabase');
                     sales = await DataModule.fetchSales();
+                    validateSalesData();
                     console.log('🗑️ DEBUG: Fetching deleted sales from Supabase');
                     deletedSales = await DataModule.fetchDeletedSales();
                     
@@ -3570,6 +3757,7 @@ async function init() {
                 products = await DataModule.fetchProducts();
                 console.log('💰 DEBUG: Fetching sales from Supabase');
                 sales = await DataModule.fetchSales();
+                validateSalesData();
                 console.log('🗑️ DEBUG: Fetching deleted sales from Supabase');
                 deletedSales = await DataModule.fetchDeletedSales();
                 
@@ -3615,6 +3803,7 @@ async function init() {
             products = await DataModule.fetchProducts();
             console.log('💰 DEBUG: Fetching sales from Supabase');
             sales = await DataModule.fetchSales();
+            validateSalesData();
             console.log('🗑️ DEBUG: Fetching deleted sales from Supabase');
             deletedSales = await DataModule.fetchDeletedSales();
             
